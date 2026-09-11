@@ -42,6 +42,7 @@ elsewhere:
 - fig-lua, a fig format written in Lua, and dotenv.lua as the first twin ([`dde46e3`](https://github.com///commit/dde46e3bd4222b409b4cd1f1028580b7b1775fef))
 - plist.lua, the twin of fig's compiled plist, with its two renderers ([`38ffb4e`](https://github.com///commit/38ffb4e25b719afd2d6605f8b83a5306221eeb80))
 - fig.grammar, a format as a description, with the twins rewritten against it ([`14f4041`](https://github.com///commit/14f40419ecd6c9f8098efb7ef9578140d3abf48a))
+- a value renderer is told fig's `literal`; plist.lua stops classifying ([`a7d66d0`](https://github.com///commit/a7d66d0a4d9c0011e0e2363d9476d457dfb781af))
 
 ### Behavioural changes
 
@@ -50,5 +51,9 @@ elsewhere:
 - `fig.index` sets `items`, `key` and `value` on rows; a script that used those names for its own bookkeeping on a row will find them overwritten.
 
 - on a dotenv input with more than one error, `dotenv.lua` reports the first in the file rather than the one the compiled tokenizer would have found first; a file with one error is refused exactly as before.
+
+- `render("value", args)` receives `args.literal`; a script that classified the value itself may now switch on it instead. A script that ignores the field is unaffected.
+
+- `plist.lua` no longer types a bare value by its own rules but by fig's, as handed in; where the two agreed nothing changes, and a host that calls `render` directly must pass `literal` for a value to be typed — absent, it is a string.
 
 <!-- git-cliff:end -->
