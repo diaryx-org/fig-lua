@@ -64,19 +64,27 @@ pub mod script {
     //! ```
     //!
     //! `parse(dialect, input)` takes the input as a Lua string (bytes) and
-    //! returns a node table — built with `fig.table()` and `t:row(...)`, or
-    //! any table of the same shape: `rows` in pre-order, each
+    //! returns either a **tree** — nodes built with `fig.mapping`,
+    //! `fig.sequence`, `fig.entry` and `fig.scalar`, holding their children
+    //! and comments as fields, which the prelude lays out in pre-order — or
+    //! a **node table** built with `fig.table()` and `t:row(...)`, or any
+    //! table of the same shape: `rows` in pre-order, each
     //! `{kind=, parent=, span={s,e}, text=, ...}` with `parent` a 0-based
     //! row id or nil for the root; `comments`, `regions`, `mentions`. To
-    //! refuse the input it returns `nil, message, byte_offset` (which is
-    //! what `fig.fail(message, byte_offset)` returns), or raises an error.
+    //! refuse the input it calls `fig.fail(message, byte_offset)`, from
+    //! anywhere; any other error it raises is reported without an offset.
+    //! Most scripts write neither by hand: `require("fig.grammar")` is a
+    //! set of rules whose results are these nodes, and `G.document{...}`
+    //! is a `parse` function.
     //!
     //! `print(dialect, t, options)` receives a node table indexed by
-    //! `fig.index` — every row has `id`, `children`, `leading`, `trailing`
-    //! and `dangling`, and `t.byid(id)` finds a row — and `options` as
+    //! `fig.index` — every row has `id`, `children` (ids), `items` (rows),
+    //! `leading`, `trailing` and `dangling`; a keyvalue row has `key` and
+    //! `value`; `t.byid(id)` finds a row — and `options` as
     //! `{pretty=, strip_comments=, indent=, width=}`. It returns the
-    //! document as a string. A table whose root is a scalar is a fragment
-    //! the editor will splice: spell it as the scalar stands alone.
+    //! document as a string; `fig.writer(options)` is a buffer that knows
+    //! the options. A table whose root is a scalar is a fragment the
+    //! editor will splice: spell it as the scalar stands alone.
     //!
     //! `render(which, args)` answers one of the renderers `M.renderers`
     //! declares — `which` is "value", "entry", "item", "tail" or "key" —
@@ -84,13 +92,21 @@ pub mod script {
     //! fragment as a string.
     //!
     //! Offsets are byte offsets into the input, 0-based and `[start, end)`,
-    //! as the wire's are — convert Lua's 1-based `i` with `i - 1`.
-    //! `languages/dotenv.lua` in this repository is a complete script; the
-    //! `fig` global is `src/prelude.lua`.
+    //! as the wire's are; `fig.scanner` speaks them, so a script converts
+    //! Lua's 1-based `i` with `i - 1` only below it. `languages/dotenv.lua`
+    //! and `languages/plist.lua` in this repository are complete scripts;
+    //! the `fig` global is `src/prelude.lua`, and `src/grammar.lua` and
+    //! `src/xml.lua` are the modules.
 }
 
 /// The `fig` global every script sees.
 const PRELUDE: &str = include_str!("prelude.lua");
+
+/// The modules a script may `require`, by name.
+const MODULES: &[(&str, &str)] = &[
+    ("fig.grammar", include_str!("grammar.lua")),
+    ("fig.xml", include_str!("xml.lua")),
+];
 
 /// A format whose parser and printer are a Lua script.
 #[derive(Debug)]
@@ -151,6 +167,23 @@ impl LuaLanguage {
         lua.globals()
             .set("fig", prelude)
             .map_err(|e| Error::Script(e.to_string()))?;
+        // The modules a script `require`s, embedded: `package.preload` is
+        // consulted before any search path, so no file is looked for.
+        let preload: Table = lua
+            .globals()
+            .get::<Table>("package")
+            .and_then(|p| p.get("preload"))
+            .map_err(|e| Error::Script(e.to_string()))?;
+        for (module_name, source) in MODULES {
+            let loader = lua
+                .load(*source)
+                .set_name(*module_name)
+                .into_function()
+                .map_err(|e| Error::Script(format!("{module_name}: {e}")))?;
+            preload
+                .set(*module_name, loader)
+                .map_err(|e| Error::Script(e.to_string()))?;
+        }
         let module: Table = lua
             .load(source)
             .set_name(name)
@@ -227,7 +260,15 @@ impl Language for LuaLanguage {
         let input = lua
             .create_string(input)
             .map_err(|e| LanguageError::new(e.to_string()))?;
-        let results: mlua::MultiValue = parse.call((dialect, input)).map_err(lua_error)?;
+        // Through the prelude's runner, which catches a `fig.fail` and
+        // lays a returned tree out as a table.
+        let run_parse: Function = lua
+            .globals()
+            .get::<Table>("fig")
+            .and_then(|fig| fig.get("run_parse"))
+            .map_err(|e| LanguageError::new(e.to_string()))?;
+        let results: mlua::MultiValue =
+            run_parse.call((parse, dialect, input)).map_err(lua_error)?;
         let mut results = results.into_iter();
         match results.next() {
             Some(mlua::Value::Table(t)) => {

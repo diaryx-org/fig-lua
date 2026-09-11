@@ -49,9 +49,15 @@ file, wherever you keep it — `languages.figl` names the path.
 
 ## Writing a format
 
-A script returns a table: what the format declares, and the functions it is.
+A script returns a table: what the format declares, and the functions it
+is. The parser is a description — a grammar whose pieces are fig's own
+kinds of node, so the tree, the byte spans, the comment binding and the
+duplicate-key policy come with it — and the printer walks the tree back
+out.
 
 ```lua
+local G = require("fig.grammar")
+
 local M = {}
 M.name = "tinykv"
 M.caps = { read = true, edit = true, serialize = true }
@@ -63,30 +69,33 @@ M.syntax = {
   flow_containers = false,
 }
 M.dialects = { { name = "tinykv", extensions = { "tkv" }, splice = "raw", empty_doc_seed = "" } }
-M.samples = { "a=1\nb=two\n" }
+M.samples = { "a=1\n# two\nb=two # words\n" }
 
-function M.parse(dialect, input)
-  local t = fig.table()
-  local root = t:row("mapping", nil, { 0, #input })
-  local at = 0
-  for line in (input .. "\n"):gmatch("(.-)\n") do
-    local eq = line:find("=", 1, true)
-    if not eq then return fig.fail("expected key=value", at) end
-    local kv = t:row("keyvalue", root, { at, at + #line }, { sep = { at + eq - 1, at + eq } })
-    t:row("string", kv, { at, at + eq - 1 }, { text = line:sub(1, eq - 1) })
-    t:row("string", kv, { at + eq, at + #line }, { text = line:sub(eq + 1) })
-    at = at + #line + 1
-  end
-  return t
-end
+M.parse = G.document({
+  root = G.map({
+    whole = true,
+    trivia = G.trivia({ comment = G.comment("#") }),
+    entry = G.entry({
+      key = G.key(G.pat("[%w_]+")),
+      sep = G.lit("="),
+      value = G.bare({ stop = G.lit("#") }),
+      missing_sep = "expected `=` after this key",
+    }),
+    expected = "expected `key=value` here",
+  }),
+})
 
-function M.print(dialect, t, options)
-  local out = {}
-  for _, id in ipairs(t.byid(0).children) do
-    local kv = t.byid(id)
-    out[#out + 1] = t.byid(kv.children[1]).text .. "=" .. t.byid(kv.children[2]).text .. "\n"
+function M.print(_, t)
+  local root = t.byid(0)
+  if root.kind ~= "mapping" then return root.text or "" end
+  local w = fig.writer()
+  for _, kv in ipairs(root.items) do
+    for _, c in ipairs(kv.key.leading) do w:put("# ", c.text, "\n") end
+    w:put(kv.key.text, "=", kv.value.text)
+    for _, c in ipairs(kv.value.trailing) do w:put(" # ", c.text) end
+    w:put("\n")
   end
-  return table.concat(out)
+  return w:string()
 end
 
 return M
@@ -95,23 +104,51 @@ return M
 The declarations are the same fields, with the same names and values, as
 the description a helper answers `describe` with — documented on the
 `helper` module of the [`fig` crate](https://docs.rs/fig), which is where
-the wire and every shape on it are stated once. In short:
+the wire and every shape on it are stated once.
 
-- `parse(dialect, input)` returns a **node table**: rows in pre-order, one
-  per node, each with a `kind`, its `parent` row, its byte `span`, and for
-  a scalar its `text`; comments bound to rows by slot. `fig.table()` builds
-  one and `t:row(...)` returns the id of the row it added. To refuse the
-  input, `return fig.fail(message, byte_offset)`.
-- `print(dialect, t, options)` gets the same shape back, indexed — every row
-  has `children`, `leading`, `trailing`, `dangling`, and `t.byid(id)` finds
-  one — and returns the document as a string.
-- `render(which, args)` answers a fragment renderer the script declares in
-  `M.renderers`; most formats declare none and let fig's splice engine
-  write edits from `M.syntax`.
+**The grammar.** A rule is a function over a scanner: it answers a result,
+or `nil` for "not here", and a `choice` moves on. `lit`, `pat`, `eol` and
+`eof` are the primitives; `seq`, `choice`, `opt`, `many`, `ahead`,
+`expect` and `fail` combine them. The rules that matter are the ones that
+answer nodes: `key` and `scalar` over anything, `quoted` (escapes, `\r\n`,
+what may follow the closing quote) and `bare` (to the line's end or a
+stop) for values, `comment` for a comment, `entry` for `key sep value`,
+and `map` and `sequence` for containers, which run `trivia` between their
+members and take their duplicate policy and their close. `document` makes
+a `parse` of a root rule. Comments are bound as trivia passes them: on the
+same line as the last node, trailing; otherwise leading on the next entry's
+key, or dangling on the container that closes first. To refuse the input
+from anywhere, `fig.fail(message, byte_offset)`; the messages a rule uses
+are options on it, so a twin can word a refusal exactly as the compiled
+parser does.
 
-Offsets are byte offsets, 0-based, `[start, end)` — the wire's, and what
-`fig lang table <file>` prints for any file, which is the fastest way to
-see what a table should be.
+**Below the grammar.** A `parse` may also return a tree built by hand —
+`fig.mapping`, `fig.sequence`, `fig.entry`, `fig.scalar`, nodes that hold
+their children and their comments as fields, with `map:put(entry)`
+applying the policy — or the wire's node table itself, `fig.table()` and
+`t:row(...)`, rows in pre-order. `fig.scanner(src)` is a byte cursor whose
+positions are already the wire's: 0-based, `[start, end)`, what `fig lang
+table <file>` prints for any file, which is the fastest way to see what a
+table should be. A rule is only a function of one, so any piece of a
+grammar can be plain Lua where the grammar cannot say it.
+
+**XML.** `require("fig.xml")` is the XML shape — tags with or without
+attributes, text with entities and CDATA decoded, comments and processing
+instructions skipped — as rules: `X.tag`, `X.close(name)`,
+`X.text_element(name)`, `X.element{ name = handler }`, `X.trivia`.
+`plist.lua` is a `G.map` of `<key>`/value entries closed by `</dict>`.
+
+**Printing.** `print(dialect, t, options)` gets the table back indexed:
+every row has `items` (its children), `leading`, `trailing`, `dangling`;
+a keyvalue has `key` and `value`; `t.byid(id)` finds one. `fig.writer(options)`
+is a buffer that writes nothing for `nl()` and `indent(depth)` when
+`pretty` is off. A table whose root is a scalar is a fragment the editor
+will splice: spell it as the scalar stands alone.
+
+**Editing** needs no code: fig's splice engine writes an edit from
+`M.syntax`. A format whose fragments cannot be spelled from constants
+declares `M.renderers` and answers `render(which, args)` — `plist.lua`
+does, for the typed element a value becomes.
 
 `fig-lua check <script.lua>` loads a script and runs fig's own harness over
 its samples — parse, print, reparse, a no-op edit — which is the check the
