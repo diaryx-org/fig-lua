@@ -1,0 +1,57 @@
+[package]
+name = "fig-lua"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A fig format written in Lua: a helper the fig CLI spawns, and a Language the fig crate registers, over a .lua script that parses and prints the format."
+readme = "README.md"
+documentation = "https://docs.rs/fig-lua"
+keywords = ["fig", "lua", "config", "parser", "plugin"]
+categories = ["config", "parser-implementations", "command-line-utilities"]
+publish = true
+
+# `xtask` is fig-lua's CI, as a program, as it is in fig-schema: `cargo xtask
+# <job>` runs one CI job and the workflow runs nothing else.
+[workspace]
+members = ["xtask"]
+
+# One `version = "…"` line for the whole repository, which is what `dx bump`
+# rewrites and what the package inherits.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Minimum supported Rust version, enforced by the `msrv` CI job, which reads
+# this value. mlua 0.12's floor, which is this crate's.
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/diaryx-org/fig-lua"
+
+# The helper executable: `fig-lua <script.lua>` serves the script's format to
+# a `fig` binary over stdin and stdout. No feature flag — a `cargo install
+# fig-lua` is a working helper.
+[[bin]]
+name = "fig-lua"
+path = "src/main.rs"
+
+[dependencies]
+# The contract this crate implements: `fig::language::Language` is what a
+# script becomes, `fig::helper::serve` is what the binary runs, and the
+# `helper` module's JSON shape is the shape a script speaks — so the Lua
+# side is documented once, there. The default feature set, deliberately:
+# it links fig's prebuilt core, so `cargo install fig-lua` needs no Zig
+# toolchain, at the price of carrying formats a helper never uses. Needs
+# the `language` and `helper` modules, on fig's main ahead of its next
+# release.
+fig = "3.5"
+# Lua 5.4, vendored: the engine is built into the binary, so a helper is
+# one file with no runtime to install beside it. `send` because a Language
+# is `Send + Sync`.
+mlua = { version = "0.12", features = ["lua54", "vendored", "send"] }
+
+# No dev-dependencies: the tests hold `dotenv.lua` to the compiled dotenv
+# in-process, and dotenv is in fig's default set. plist is not — it would
+# mean building fig's core from source, with a Zig toolchain — so
+# `plist.lua` is held to its sibling table for table, through the fixtures
+# `fig lang table -i plist` printed, and not in-process.
