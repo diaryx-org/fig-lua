@@ -35,5 +35,20 @@ elsewhere:
 
 ## Unreleased
 
-<!-- git-cliff:begin -->
+<!-- git-cliff:begin — generated; edits here are overwritten -->
+
+### Added
+
+- fig-lua, a fig format written in Lua, and dotenv.lua as the first twin ([`dde46e3`](https://github.com///commit/dde46e3bd4222b409b4cd1f1028580b7b1775fef))
+- plist.lua, the twin of fig's compiled plist, with its two renderers ([`38ffb4e`](https://github.com///commit/38ffb4e25b719afd2d6605f8b83a5306221eeb80))
+- fig.grammar, a format as a description, with the twins rewritten against it ([`14f4041`](https://github.com///commit/14f40419ecd6c9f8098efb7ef9578140d3abf48a))
+
+### Behavioural changes
+
+- `fig.fail(message, at)` raises rather than returning `nil, message, at`. A script that wrote `return fig.fail(...)` is unchanged; one that called it and went on to do something else no longer reaches that code.
+
+- `fig.index` sets `items`, `key` and `value` on rows; a script that used those names for its own bookkeeping on a row will find them overwritten.
+
+- on a dotenv input with more than one error, `dotenv.lua` reports the first in the file rather than the one the compiled tokenizer would have found first; a file with one error is refused exactly as before.
+
 <!-- git-cliff:end -->
