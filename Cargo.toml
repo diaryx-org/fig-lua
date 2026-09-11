@@ -44,7 +44,7 @@ path = "src/main.rs"
 # toolchain, at the price of carrying formats a helper never uses. Needs
 # the `language` and `helper` modules, on fig's main ahead of its next
 # release.
-fig = "3.5"
+fig = "4"
 # Lua 5.4, vendored: the engine is built into the binary, so a helper is
 # one file with no runtime to install beside it. `send` because a Language
 # is `Send + Sync`.
