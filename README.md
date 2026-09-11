@@ -148,7 +148,11 @@ will splice: spell it as the scalar stands alone.
 **Editing** needs no code: fig's splice engine writes an edit from
 `M.syntax`. A format whose fragments cannot be spelled from constants
 declares `M.renderers` and answers `render(which, args)` — `plist.lua`
-does, for the typed element a value becomes.
+does, for the typed element a value becomes. A value renderer is told
+what fig's own literal rules made of the text, `args.literal`: `"int"`,
+`"float"`, `"bool"`, `"datetime"`, `"null"` or `"string"`, the one meaning
+every format's `set` gives `42` or `Yes`, so a script spells a kind and
+never decides one.
 
 `fig-lua check <script.lua>` loads a script and runs fig's own harness over
 its samples — parse, print, reparse, a no-op edit — which is the check the

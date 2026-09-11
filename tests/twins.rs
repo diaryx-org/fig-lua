@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use fig::language::{Language, RenderArgs, Renderer};
+use fig::language::{Language, Literal, RenderArgs, Renderer};
 use fig::{Document, Editor, Format, Segment, Value};
 use fig_lua::LuaLanguage;
 
@@ -243,47 +243,59 @@ fn plist_registers_and_renders_typed_values() {
     // checked here is the harness, the printer, and the two renderers by
     // the rules the compiled ones follow.
     let lang = script("plist.lua");
-    let render = |which: Renderer, key: &str, value: &str| -> String {
+    // The value renderer spells the kind fig's bare-literal rules gave the
+    // text — `literal` — and decides none itself.
+    let render = |which: Renderer, key: &str, value: &str, literal: Literal| -> String {
         let args = RenderArgs {
             dialect: "lua-plist",
             indent: b"  ",
             key: key.as_bytes(),
             value: value.as_bytes(),
+            literal,
             old_key: b"",
         };
         String::from_utf8(lang.render(which, args).expect("renders")).unwrap()
     };
-    for (bare, element) in [
-        ("42", "<integer>42</integer>"),
-        ("-1_000", "<integer>-1_000</integer>"),
-        ("0xff", "<integer>0xff</integer>"),
-        ("007", "<string>007</string>"),
-        ("2.5", "<real>2.5</real>"),
-        ("1e3", "<real>1e3</real>"),
-        ("true", "<true/>"),
-        ("Yes", "<string>Yes</string>"),
-        ("2026-09-10", "<date>2026-09-10</date>"),
-        ("2026-09-10T12:00:00Z", "<date>2026-09-10T12:00:00Z</date>"),
-        ("2026-02-30", "<string>2026-02-30</string>"),
-        ("12:30", "<date>12:30</date>"),
-        ("1 < 2 & 3", "<string>1 &lt; 2 &amp; 3</string>"),
-        ("<data>aGk=</data>", "<data>aGk=</data>"),
-        ("  <string>2.0</string>  ", "<string>2.0</string>"),
+    for (bare, literal, element) in [
+        ("42", Literal::Int, "<integer>42</integer>"),
+        ("-1_000", Literal::Int, "<integer>-1_000</integer>"),
+        ("007", Literal::String, "<string>007</string>"),
+        ("2.5", Literal::Float, "<real>2.5</real>"),
+        ("true", Literal::Bool, "<true/>"),
+        ("false", Literal::Bool, "<false/>"),
+        ("Yes", Literal::String, "<string>Yes</string>"),
+        ("2026-09-10", Literal::Datetime, "<date>2026-09-10</date>"),
+        (
+            "1 < 2 & 3",
+            Literal::String,
+            "<string>1 &lt; 2 &amp; 3</string>",
+        ),
+        ("<data>aGk=</data>", Literal::String, "<data>aGk=</data>"),
+        (
+            "  <string>2.0</string>  ",
+            Literal::String,
+            "<string>2.0</string>",
+        ),
     ] {
-        assert_eq!(render(Renderer::Value, "", bare), element, "{bare}");
+        assert_eq!(
+            render(Renderer::Value, "", bare, literal),
+            element,
+            "{bare}"
+        );
     }
     assert!(
         lang.render(
             Renderer::Value,
             RenderArgs {
                 value: b"null",
+                literal: Literal::Null,
                 ..Default::default()
             }
         )
         .is_err()
     );
     assert_eq!(
-        render(Renderer::Entry, "a&b", "<true/>"),
+        render(Renderer::Entry, "a&b", "<true/>", Literal::String),
         "<key>a&amp;b</key>\n  <true/>"
     );
 
@@ -299,6 +311,11 @@ fn plist_registers_and_renders_typed_values() {
         printed,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>a</key>\n  <string>x</string>\n  <key>l</key>\n  <array>\n    <integer>1</integer>\n  </array>\n</dict>\n</plist>\n"
     );
+    // The literal's arrival through the engine is proved at the command
+    // line (`fig set … --lang lua-plist` against `-i plist`), where the
+    // value is bare text: the Rust editor prints a value through the format
+    // before the renderer sees it, so in-process a `42` is already an
+    // element by the time `literal` is computed.
     // Deleting is generic and line-based, so it holds without a renderer.
     let mut ed = Editor::open(src, lua).unwrap();
     ed.delete(&[Segment::Key("a")]).unwrap();

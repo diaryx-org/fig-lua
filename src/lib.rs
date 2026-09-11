@@ -88,8 +88,11 @@ pub mod script {
     //!
     //! `render(which, args)` answers one of the renderers `M.renderers`
     //! declares — `which` is "value", "entry", "item", "tail" or "key" —
-    //! given `{dialect=, indent=, key=, value=, old_key=}`, and returns the
-    //! fragment as a string.
+    //! given `{dialect=, indent=, key=, value=, literal=, old_key=}`, and
+    //! returns the fragment as a string. `literal` is what fig's
+    //! bare-literal rules made of `value`: "null", "bool", "int", "float",
+    //! "datetime" or "string" — classified by fig, so a script spells the
+    //! kind it is told and never decides one.
     //!
     //! Offsets are byte offsets into the input, 0-based and `[start, end)`,
     //! as the wire's are; `fig.scanner` speaks them, so a script converts
@@ -352,6 +355,9 @@ impl Language for LuaLanguage {
         set("key", args.key)?;
         set("value", args.value)?;
         set("old_key", args.old_key)?;
+        // What fig's bare-literal rules made of the value, for the value
+        // renderer: "null", "bool", "int", "float", "datetime" or "string".
+        set("literal", args.literal.name().as_bytes())?;
         let name = match which {
             Renderer::Value => "value",
             Renderer::Entry => "entry",

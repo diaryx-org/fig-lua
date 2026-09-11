@@ -290,118 +290,32 @@ function M.print(_dialect, t, options)
 end
 
 -- ── the renderers ─────────────────────────────────────────────────────────
--- A value the CLI hands the editor is bare text; it becomes a typed element
--- by the fig dialect's own literal-else-string rules — `true`/`false`, a
+-- A value the CLI hands the editor is bare text, and fig has already said
+-- what its own literal rules make of it — `args.literal`: `true`/`false`, a
 -- number (decimal with `_` separators and no leading zero, or `0x`/`0o`/
--- `0b`), a datetime shape — or `<string>`, escaped. Text that already
--- starts with `<` is spliced as written: how `<data>` or a nested
--- `<dict>` is given, or a type forced.
+-- `0b`), a datetime shape, or a string — so this only spells the typed
+-- element for the kind it is told. Text that already starts with `<` is
+-- spliced as written: how `<data>` or a nested `<dict>` is given, or a
+-- type forced.
 
-local function digit_run(s, i, class)
-  local prev_us = true
-  local j = i
-  while j <= #s do
-    local c = s:sub(j, j)
-    if c == "_" then
-      if prev_us then return nil end
-      prev_us = true
-    elseif c:match(class) then
-      prev_us = false
-    else
-      break
-    end
-    j = j + 1
-  end
-  if prev_us then return nil end
-  return j
-end
+local ELEMENT = {
+  int = "integer",
+  float = "real",
+  datetime = "date",
+}
 
-local function sniff_number(s)
-  local i = 1
-  local c = s:sub(1, 1)
-  if c == "+" or c == "-" then i = 2 end
-  if i > #s then return nil end
-  local body = s:sub(i)
-  local radix = body:sub(1, 2)
-  if radix == "0x" or radix == "0o" or radix == "0b" then
-    local class = radix == "0x" and "%x" or (radix == "0o" and "[0-7]" or "[01]")
-    local j = digit_run(body, 3, class)
-    if j and j == #body + 1 then return "integer" end
-    return nil
-  end
-  local j = digit_run(s, i, "%d")
-  if not j then return nil end
-  if j - i > 1 and s:sub(i, i) == "0" then return nil end
-  local float = false
-  if s:sub(j, j) == "." then
-    float = true
-    j = digit_run(s, j + 1, "%d")
-    if not j then return nil end
-  end
-  local e = s:sub(j, j)
-  if e == "e" or e == "E" then
-    float = true
-    j = j + 1
-    local sign = s:sub(j, j)
-    if sign == "+" or sign == "-" then j = j + 1 end
-    j = digit_run(s, j, "%d")
-    if not j then return nil end
-  end
-  if j ~= #s + 1 then return nil end
-  return float and "real" or "integer"
-end
-
-local DAYS = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
-local function valid_date_part(s)
-  local y, m, d = s:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
-  if not y then return false end
-  y, m, d = tonumber(y), tonumber(m), tonumber(d)
-  if m < 1 or m > 12 then return false end
-  local days = DAYS[m]
-  if m == 2 and ((y % 4 == 0 and y % 100 ~= 0) or y % 400 == 0) then days = 29 end
-  return d >= 1 and d <= days
-end
-local function valid_time_part(s)
-  local h, mi, rest = s:match("^(%d%d):(%d%d)(.*)$")
-  if not h or tonumber(h) > 23 or tonumber(mi) > 59 then return false end
-  if rest == "" then return true end
-  local sec, frac = rest:match("^:(%d%d)(.*)$")
-  if not sec or tonumber(sec) > 60 then return false end
-  if frac == "" then return true end
-  return frac:match("^%.%d+$") ~= nil
-end
-local function is_datetime(s)
-  if #s >= 3 and s:sub(3, 3) == ":" then return valid_time_part(s) end
-  if #s < 10 or not valid_date_part(s:sub(1, 10)) then return false end
-  if #s == 10 then return true end
-  local sep = s:sub(11, 11)
-  if sep ~= "T" and sep ~= "t" and sep ~= " " then return false end
-  local rest = s:sub(12)
-  local last = rest:sub(-1)
-  if last == "Z" or last == "z" then
-    rest = rest:sub(1, -2)
-  elseif #rest >= 6 and rest:sub(-6, -6):match("[+-]") and rest:sub(-3, -3) == ":" then
-    local oh, om = rest:sub(-5, -4), rest:sub(-2)
-    if not (oh:match("^%d%d$") and om:match("^%d%d$")) or tonumber(oh) > 23 or tonumber(om) > 59 then return false end
-    rest = rest:sub(1, -7)
-  end
-  return valid_time_part(rest)
-end
-
-local function render_value(value_text)
+local function render_value(value_text, literal)
   local t = trim(value_text)
   if t:sub(1, 1) == "<" then return t end
-  if t == "null" then error("a plist has no null; a null value cannot be written", 0) end
-  if t == "true" then return "<true/>" end
-  if t == "false" then return "<false/>" end
-  local num = sniff_number(t)
-  if num then return "<" .. num .. ">" .. t .. "</" .. num .. ">" end
-  if is_datetime(t) then return "<date>" .. t .. "</date>" end
+  if literal == "null" then error("a plist has no null; a null value cannot be written", 0) end
+  if literal == "bool" then return t == "true" and "<true/>" or "<false/>" end
+  local tag = ELEMENT[literal]
+  if tag then return "<" .. tag .. ">" .. t .. "</" .. tag .. ">" end
   return text_element("string", t)
 end
 
 function M.render(which, args)
-  if which == "value" then return render_value(args.value) end
+  if which == "value" then return render_value(args.value, args.literal or "string") end
   if which == "entry" then
     return "<key>" .. X.escape(args.key) .. "</key>\n" .. args.indent .. args.value
   end
