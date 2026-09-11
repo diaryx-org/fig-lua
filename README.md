@@ -25,15 +25,18 @@ lua-dotenv: registered (read edit serialize); every sample parsed, printed and r
 secrets.env: same table as `dotenv` (13 rows)
 ```
 
-One script ships in `languages/`, the twin of a format fig compiles in
-and held to it row for row:
+Two scripts ship in `languages/`, each the twin of a format fig compiles
+in and held to it row for row:
 
 - `dotenv.lua` — `.env` files: bash-identifier keys, an optional `export`,
   quoted and unquoted values, `#` comments, flat.
+- `plist.lua` — Apple property lists, the XML form: `dict`, `array`, typed
+  scalars, `date` and `data`; and the two fragment renderers that spell an
+  edited value as a typed element and an entry as `<key>` over it.
 
-It is also what a new script is written against: a complete parser and
-printer, and `fig lang check <name> --against <format>` is how a twin is
-proven.
+They are also what a new script is written against: each is a complete
+parser and printer, and `fig lang check <name> --against <format>` is how a
+twin is proven.
 
 ## Install
 

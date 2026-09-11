@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use fig::language::Language;
+use fig::language::{Language, RenderArgs, Renderer};
 use fig::{Document, Editor, Format, Segment, Value};
 use fig_lua::LuaLanguage;
 
@@ -215,6 +215,97 @@ fn dotenv_edits_as_the_compiled_format_does() {
     }
     assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
     assert!(mine.source().unwrap().contains("# the key\nAPI_KEY="));
+}
+
+#[test]
+fn plist_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("plist.lua");
+    for (name, source, want) in fixtures("plist", "plist") {
+        let table = lang
+            .parse("lua-plist", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one"
+        );
+    }
+}
+
+#[test]
+fn plist_registers_and_renders_typed_values() {
+    // plist is not in fig's default feature set, so the compiled sibling is
+    // not here to compare against in-process; `fig lang check lua-plist
+    // --against plist` is that comparison, and the CLI is where the editor
+    // is driven with bare text (the Rust editor spells a key through the
+    // printer, which for plist is not the key — a task in fig). What is
+    // checked here is the harness, the printer, and the two renderers by
+    // the rules the compiled ones follow.
+    let lang = script("plist.lua");
+    let render = |which: Renderer, key: &str, value: &str| -> String {
+        let args = RenderArgs {
+            dialect: "lua-plist",
+            indent: b"  ",
+            key: key.as_bytes(),
+            value: value.as_bytes(),
+            old_key: b"",
+        };
+        String::from_utf8(lang.render(which, args).expect("renders")).unwrap()
+    };
+    for (bare, element) in [
+        ("42", "<integer>42</integer>"),
+        ("-1_000", "<integer>-1_000</integer>"),
+        ("0xff", "<integer>0xff</integer>"),
+        ("007", "<string>007</string>"),
+        ("2.5", "<real>2.5</real>"),
+        ("1e3", "<real>1e3</real>"),
+        ("true", "<true/>"),
+        ("Yes", "<string>Yes</string>"),
+        ("2026-09-10", "<date>2026-09-10</date>"),
+        ("2026-09-10T12:00:00Z", "<date>2026-09-10T12:00:00Z</date>"),
+        ("2026-02-30", "<string>2026-02-30</string>"),
+        ("12:30", "<date>12:30</date>"),
+        ("1 < 2 & 3", "<string>1 &lt; 2 &amp; 3</string>"),
+        ("<data>aGk=</data>", "<data>aGk=</data>"),
+        ("  <string>2.0</string>  ", "<string>2.0</string>"),
+    ] {
+        assert_eq!(render(Renderer::Value, "", bare), element, "{bare}");
+    }
+    assert!(
+        lang.render(
+            Renderer::Value,
+            RenderArgs {
+                value: b"null",
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(
+        render(Renderer::Entry, "a&b", "<true/>"),
+        "<key>a&amp;b</key>\n  <true/>"
+    );
+
+    let lua = fig::language::register(lang).expect("registers")[0];
+    let src = b"<dict>\n  <key>a</key>\n  <string>x</string>\n  <key>l</key>\n  <array><integer>1</integer></array>\n</dict>\n";
+    let doc = Document::parse(src, lua).unwrap();
+    assert_eq!(
+        doc.to_value().unwrap().get("a").and_then(Value::as_str),
+        Some("x")
+    );
+    let printed = doc.serialize(lua).unwrap();
+    assert_eq!(
+        printed,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>a</key>\n  <string>x</string>\n  <key>l</key>\n  <array>\n    <integer>1</integer>\n  </array>\n</dict>\n</plist>\n"
+    );
+    // Deleting is generic and line-based, so it holds without a renderer.
+    let mut ed = Editor::open(src, lua).unwrap();
+    ed.delete(&[Segment::Key("a")]).unwrap();
+    assert_eq!(
+        ed.source().unwrap(),
+        "<dict>\n  <key>l</key>\n  <array><integer>1</integer></array>\n</dict>\n"
+    );
 }
 
 #[test]
