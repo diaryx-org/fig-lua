@@ -326,6 +326,95 @@ fn plist_registers_and_renders_typed_values() {
 }
 
 #[test]
+fn canonical_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("canonical.lua");
+    for (name, source, want) in fixtures("canonical", "canonical") {
+        let table = lang
+            .parse("lua-canonical", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+            fig::helper::encode(&canonical(&got)),
+            fig::helper::encode(&canonical(&want)),
+        );
+    }
+}
+
+#[test]
+fn canonical_prints_one_spelling_that_reparses_to_the_same_table() {
+    // The canonical form is opt-in in fig's build, so the compiled sibling
+    // is not here to compare against in-process; `fig lang check
+    // lua-canonical --against canonical` is that comparison. What is
+    // checked here is the printer: every fixture prints to a document
+    // that parses back to the same rows and comments, and a second print
+    // is the first.
+    let lang = script("canonical.lua");
+    for (name, source, _) in fixtures("canonical", "canonical") {
+        let table = lang.parse("lua-canonical", &source).unwrap();
+        let printed = lang
+            .print("lua-canonical", &table, &Default::default())
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let again = lang.parse("lua-canonical", &printed).unwrap_or_else(|e| {
+            panic!(
+                "{name}: {}\n{}",
+                e.message,
+                String::from_utf8_lossy(&printed)
+            )
+        });
+        // Spans move; rows, texts and comments do not.
+        let strip = |t: &fig::language::NodeTable| {
+            let mut v = fig::helper::table_to_value(t);
+            let rows = match &mut v {
+                Value::Map(entries) => entries
+                    .iter_mut()
+                    .find(|(k, _)| k.as_str() == Some("rows"))
+                    .map(|(_, rows)| rows),
+                _ => None,
+            };
+            if let Some(Value::Seq(rows)) = rows {
+                for row in rows.iter_mut() {
+                    if let Value::Map(fields) = row {
+                        fields.retain(|(k, _)| k.as_str() != Some("span"));
+                    }
+                }
+            }
+            canonical(&v)
+        };
+        assert_eq!(
+            strip(&table),
+            strip(&again),
+            "{name}: the print does not reparse to the same tree"
+        );
+        let twice = lang
+            .print("lua-canonical", &again, &Default::default())
+            .unwrap();
+        assert_eq!(
+            printed, twice,
+            "{name}: the second print differs from the first"
+        );
+    }
+
+    // The layout is the compiled printer's, with a trailing comment kept
+    // on the line of the value it belongs to.
+    let table = lang
+        .parse(
+            "lua-canonical",
+            b"/* d */ { \"a\": [1, ~f2, @local_date \"2024-01-01\"], &x \"b\": {}, // e\n \"c\": *x }\n",
+        )
+        .unwrap();
+    let printed = lang
+        .print("lua-canonical", &table, &Default::default())
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(printed).unwrap(),
+        "{\n  /* d */\n  \"a\": [\n    1,\n    ~f2,\n    @local_date \"2024-01-01\"\n  ],\n  &x \"b\": {}, // e\n  \"c\": *x\n}\n"
+    );
+}
+
+#[test]
 fn a_script_that_is_not_a_description_is_refused_at_load() {
     let err = LuaLanguage::from_source("bad.lua", "return 42").unwrap_err();
     assert!(err.to_string().contains("bad.lua"), "{err}");

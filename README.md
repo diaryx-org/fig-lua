@@ -25,7 +25,7 @@ lua-dotenv: registered (read edit serialize); every sample parsed, printed and r
 secrets.env: same table as `dotenv` (13 rows)
 ```
 
-Two scripts ship in `languages/`, each the twin of a format fig compiles
+Three scripts ship in `languages/`, each the twin of a format fig compiles
 in and held to it row for row:
 
 - `dotenv.lua` — `.env` files: bash-identifier keys, an optional `export`,
@@ -33,6 +33,11 @@ in and held to it row for row:
 - `plist.lua` — Apple property lists, the XML form: `dict`, `array`, typed
   scalars, `date` and `data`; and the two fragment renderers that spell an
   edited value as a typed element and an entry as `<key>` over it.
+- `canonical.lua` — fig's canonical form, the tree spelled with nothing
+  added: flow containers, JSON strings, numbers with their kind pinned,
+  extended scalars, anchors, tags and aliases, keys that are any node,
+  `//` and `/* */` comments. Every row the wire can carry, in one script;
+  the compiled sibling is opt-in (`zig build -Dcanonical=true`).
 
 They are also what a new script is written against: each is a complete
 parser and printer, and `fig lang check <name> --against <format>` is how a
@@ -131,6 +136,13 @@ positions are already the wire's: 0-based, `[start, end)`, what `fig lang
 table <file>` prints for any file, which is the fastest way to see what a
 table should be. A rule is only a function of one, so any piece of a
 grammar can be plain Lua where the grammar cannot say it.
+
+Where a format's binding rule is not the module's, a script says so
+around it: `canonical.lua` runs its own `parse` over `G.context` with a
+`comment` method of its own, and gives `G.map` an `open` rule that keeps a
+`//` on the opening line for the container, and an `after` rule that takes
+the comma or looks ahead for the close. A rule is a function, and so is
+the context's policy.
 
 **XML.** `require("fig.xml")` is the XML shape — tags with or without
 attributes, text with entities and CDATA decoded, comments and processing
