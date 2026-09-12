@@ -39,10 +39,15 @@ elsewhere:
 
 ### Added
 
-- fig-lua, a fig format written in Lua, and dotenv.lua as the first twin ([`dde46e3`](https://github.com///commit/dde46e3bd4222b409b4cd1f1028580b7b1775fef))
-- plist.lua, the twin of fig's compiled plist, with its two renderers ([`38ffb4e`](https://github.com///commit/38ffb4e25b719afd2d6605f8b83a5306221eeb80))
-- fig.grammar, a format as a description, with the twins rewritten against it ([`14f4041`](https://github.com///commit/14f40419ecd6c9f8098efb7ef9578140d3abf48a))
-- a value renderer is told fig's `literal`; plist.lua stops classifying ([`a7d66d0`](https://github.com///commit/a7d66d0a4d9c0011e0e2363d9476d457dfb781af))
+- fig-lua, a fig format written in Lua, and dotenv.lua as the first twin ([`dde46e3`](https://github.com/diaryx-org/fig-lua/commit/dde46e3bd4222b409b4cd1f1028580b7b1775fef))
+- plist.lua, the twin of fig's compiled plist, with its two renderers ([`38ffb4e`](https://github.com/diaryx-org/fig-lua/commit/38ffb4e25b719afd2d6605f8b83a5306221eeb80))
+- fig.grammar, a format as a description, with the twins rewritten against it ([`14f4041`](https://github.com/diaryx-org/fig-lua/commit/14f40419ecd6c9f8098efb7ef9578140d3abf48a))
+- a value renderer is told fig's `literal`; plist.lua stops classifying ([`a7d66d0`](https://github.com/diaryx-org/fig-lua/commit/a7d66d0a4d9c0011e0e2363d9476d457dfb781af))
+- canonical.lua, the twin of fig's canonical form ([`15aa74c`](https://github.com/diaryx-org/fig-lua/commit/15aa74c61f332e14166e4bb735ec0e4edd05f3f6))
+
+### Fixed
+
+- **prelude** — a mapping key with no text is never a duplicate ([`99f43d4`](https://github.com/diaryx-org/fig-lua/commit/99f43d4ae386a28b2c59e720113803a7eeae9306))
 
 ### Behavioural changes
 
@@ -55,5 +60,7 @@ elsewhere:
 - `render("value", args)` receives `args.literal`; a script that classified the value itself may now switch on it instead. A script that ignores the field is unaffected.
 
 - `plist.lua` no longer types a bare value by its own rules but by fig's, as handed in; where the two agreed nothing changes, and a host that calls `render` directly must pass `literal` for a value to be typed — absent, it is a string.
+
+- a script whose grammar puts a null or container key into a `G.map` (or calls `map:put` with one) no longer fails with `table index is nil`; the entry is kept under every duplicate policy.
 
 <!-- git-cliff:end -->
