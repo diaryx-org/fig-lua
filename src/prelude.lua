@@ -214,10 +214,11 @@ function fig.entry(key, value, span)
 end
 
 --- Put an entry in a mapping by its duplicate policy; returns the entry
---- that holds the value afterwards.
+--- that holds the value afterwards. A key with no text — a null, a
+--- container, in a format whose keys are nodes — repeats nothing.
 function Node:put(entry)
   local name = entry.key.text
-  local existing = self.by_key[name]
+  local existing = name ~= nil and self.by_key[name] or nil
   local policy = self.duplicates
   if existing and policy ~= "keep" then
     if policy == "last_value" then
@@ -233,7 +234,7 @@ function Node:put(entry)
     error("unknown duplicate policy `" .. tostring(policy) .. "`", 0)
   end
   self.entries[#self.entries + 1] = entry
-  if not existing then self.by_key[name] = entry end
+  if name ~= nil and not existing then self.by_key[name] = entry end
   return entry
 end
 
