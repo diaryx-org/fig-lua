@@ -53,6 +53,8 @@ elsewhere:
 - **languages** — zon.lua, the twin of fig's compiled ZON ([`edd6159`](https://github.com/diaryx-org/fig-lua/commit/edd6159af01ef01422b724cc7e0c0f456f97c981))
 - **languages** — json5.lua, the twins of fig's compiled JSONC and JSON5 dialects ([`c60600d`](https://github.com/diaryx-org/fig-lua/commit/c60600d1a63e7f9eaacbb997980987fc1e0b6a32))
 - **languages** — nestedtext.lua, the twin of fig's compiled NestedText ([`5475902`](https://github.com/diaryx-org/fig-lua/commit/5475902d39f91f1265e08b3dd5b7bb8c52826d22))
+- **prelude** — a table records its tag directives ([`005a0a0`](https://github.com/diaryx-org/fig-lua/commit/005a0a0a79ca081f9fd9ab8c3a31d90840484823))
+- **languages** — yaml.lua, the twin of fig's compiled YAML ([`939b4d2`](https://github.com/diaryx-org/fig-lua/commit/939b4d2df25b870d32cd3b059ef530492c8ca2f3))
 
 ### Fixed
 
