@@ -37,12 +37,11 @@ the compiled parser step for step, and most are grammars:
   surrogate pairs, the byte-order mark, no comments; the format everyone
   already knows, so the one to read first.
 - `json5.lua` — JSONC and JSON5, two dialects from one script (`lua-json5`
-  and `lua-jsonc`), as the compiled JSON module is one parser with a
-  dialect switch: `//` and `/* */` comments bound the way the compiled
-  parser binds them, by the tokens around each one; and JSON5's unquoted
-  keys, single quotes, trailing commas, `Infinity`/`NaN`, hex and bare
-  dots. Written as the compiled state machine rather than as a grammar,
-  because the comments are what make these dialects.
+  and `lua-jsonc`), one grammar built twice: `//` and `/* */` comments,
+  with the three refinements of the binding policy these dialects make
+  stated as context options; and JSON5's unquoted keys, single quotes,
+  trailing commas, `Infinity`/`NaN`, hex and bare dots. The one to read
+  for how a grammar states where a comment goes.
 - `fig.lua` — fig's own authoring dialect, `.figl`, whole: `>` marker
   depth, section headers and `a.b[]`/`+` append headers, `*` elements,
   dotted keys, `key: type = value` annotations kept as tags, flow values
@@ -62,18 +61,17 @@ the compiled parser step for step, and most are grammars:
   the whole of toml-test, and its edits to the compiled format's bytes.
 - `zon.lua` — Zig Object Notation, `.zon`: `.{ .field = value }` structs,
   `.{ 1, 2 }` arrays, Zig's numbers, strings and `\\` multiline strings,
-  `.enum` and `'c'` literals kept as extended scalars, `//` comments
-  recovered from the gaps between nodes as the compiled walk recovers
-  them. The compiled parser is Zig's own `std.zig.Ast`, so this carries
-  as much of Zig's tokenizer and expression grammar as decides what ZON
-  is, and refuses the rest as the compiled one does.
+  `.enum` and `'c'` literals kept as extended scalars, `//` comments. A
+  grammar over the data format: what is Zig but not ZON — an operator, a
+  builtin, a doc comment — is refused in words of its own, not parsed
+  and then declined as the compiled `std.zig.Ast` does.
 - `yaml.lua` — YAML 1.2, whole, and 1.1's scalar resolution as a second
   dialect (`lua-yaml-1.1`): block and flow collections, every scalar
   style — plain, quoted with their escapes and folds, `|` and `>` blocks
   with their indicators — anchors, aliases and `<<` merges, tags kept
   verbatim with their `%TAG` handles, explicit `?` keys, directives and
-  document markers, comments bound as the compiled parser binds them; and
-  the compiled printer's block style with its flow form where a
+  document markers, comments; and the compiled printer's block style
+  with its flow form where a
   collection fits the width. The largest twin, and the one that carries
   a reference layer (`caps.references`), so a document leaving it for
   JSON is collapsed as one leaving the compiled YAML is; held to the
