@@ -1,11 +1,7 @@
 -- INI, in Lua: the twin of fig's compiled `ini` format, row for row,
 -- region for region, mention for mention.
 --
--- `fig lang check lua-ini --against ini <files…>` holds this script to the
--- compiled parser's node table on every file given, and this script is
--- written against `fig lang table -i ini`, which prints that table. What
--- the compiled format accepts is stated in fig's `src/languages/ini/`, and
--- this follows it:
+-- The format:
 --
 --   * a line is a `[section]` header, a `key = value`, a `;` or `#`
 --     comment, or blank; `=` is the only separator; a value is the rest of
@@ -25,11 +21,13 @@
 --     dangles on the section the last header opened.
 --
 -- One level deep by construction (`max_mapping_depth = 1`): there is no
--- spelling for a section inside a section. The refusals are the compiled
--- parser's, in its words and at its offsets, with one difference of
--- order: the compiled tokenizer runs over the whole file before its
--- parser, so a file with a lexical error after a grammatical one reports
--- the lexical one; this reports the first.
+-- spelling for a section inside a section. The node table is held row for
+-- row against the compiled format — `fig lang table -i ini` prints that
+-- table, and `fig lang check lua-ini --against ini <files…>` compares them
+-- file by file. Every document the compiled format refuses is refused
+-- here, in this script's own words and at its own offsets: the contract is
+-- the format, not the parser. Spans are byte offsets, 0-based,
+-- `[start, end)`.
 
 local G = require("fig.grammar")
 
@@ -57,185 +55,87 @@ M.dialects = {
 M.samples = { "a = 1\n\n[s]\nk = v\n" }
 M.renderers = {}
 
--- ── errors, as the compiled parser words them ─────────────────────────────
+-- ── the grammar ───────────────────────────────────────────────────────────
 
-local MESSAGES = {
-  UnexpectedToken = "unexpected content here; expected a `[section]` header or a `key = value` line",
-  InvalidKey = "a key/section name cannot be empty",
-  DuplicateKey = "this section conflicts with a key of the same name already defined at this level",
-  UnexpectedCarriageReturn = "a bare `\\r` must be followed by `\\n`; line endings must be `\\n` or `\\r\\n`",
-  UnclosedSection = "unclosed `[section]` header; expected a `]` before the end of the line",
-  MissingEquals = "expected `=` after this key; every INI line is `key = value`",
-  TrailingContent = "unexpected content after `]`; a section header must be alone on its line",
-}
+-- Blank lines and whole-line `;`/`#` comments. A comment waits in the
+-- section context for the key or header it leads; nothing trails a value,
+-- since a `;` after one is value text.
+local trivia = G.trivia({
+  space = G.choice({
+    G.hs1,
+    G.eol,
+    G.fail_if(G.lit("\r"), "a bare `\\r` must be followed by `\\n`; line endings must be `\\n` or `\\r\\n`"),
+  }),
+  comment = G.choice({ G.comment(";"), G.comment("#") }),
+})
 
--- ── the tokenizer ─────────────────────────────────────────────────────────
--- Line-oriented, as the compiled one: what a byte means depends on
--- whether the line's `=` has passed. Every token is `{kind, s, e}`; a
--- `text` token is a section name, a key or a value by position, its span
--- trimmed of spaces and tabs.
-
-local function is_line_end(src, at)
-  local c = src:byte(at + 1)
-  return c == nil or c == 10 or c == 13
-end
-
-local function trim_span(src, s, e)
-  while s < e and (src:byte(s + 1) == 32 or src:byte(s + 1) == 9) do s = s + 1 end
-  while e > s and (src:byte(e) == 32 or src:byte(e) == 9) do e = e - 1 end
-  return s, e
-end
-
-local function tokenize(src)
-  local tokens = {}
-  local n = #src
-  local i = src:sub(1, 3) == "\239\187\191" and 3 or 0
-  local in_value = false
-  local function emit(kind, s, e) tokens[#tokens + 1] = { kind = kind, s = s, e = e } end
-  while i < n do
-    local c = src:byte(i + 1)
-    if c == 10 then
-      emit("newline", i, i + 1)
-      i = i + 1
-      in_value = false
-    elseif c == 13 then
-      if src:byte(i + 2) ~= 10 then fig.fail(MESSAGES.UnexpectedCarriageReturn, i) end
-      emit("newline", i, i + 2)
-      i = i + 2
-      in_value = false
-    elseif c == 32 or c == 9 then
-      i = i + 1
-    elseif in_value then
-      local s = i
-      while not is_line_end(src, i) do i = i + 1 end
-      emit("text", trim_span(src, s, i))
-    elseif c == 59 or c == 35 then
-      i = i + 1
-      local s = i
-      while not is_line_end(src, i) do i = i + 1 end
-      emit("comment", s, i)
-    elseif c == 91 then
-      emit("open_bracket", i, i + 1)
-      i = i + 1
-      local s = i
-      while i < n and src:byte(i + 1) ~= 93 do
-        if is_line_end(src, i) then fig.fail(MESSAGES.UnclosedSection, i) end
-        i = i + 1
-      end
-      if i >= n then fig.fail(MESSAGES.UnclosedSection, i) end
-      emit("text", trim_span(src, s, i))
-      emit("close_bracket", i, i + 1)
-      i = i + 1
-      while i < n and (src:byte(i + 1) == 32 or src:byte(i + 1) == 9) do i = i + 1 end
-      if not is_line_end(src, i) then fig.fail(MESSAGES.TrailingContent, i) end
-    else
-      local s = i
-      while i < n and src:byte(i + 1) ~= 61 and not is_line_end(src, i) do i = i + 1 end
-      if i >= n or src:byte(i + 1) ~= 61 then fig.fail(MESSAGES.MissingEquals, i) end
-      emit("text", trim_span(src, s, i))
-      emit("equals", i, i + 1)
-      i = i + 1
-      in_value = true
-    end
-  end
-  emit("end_of_file", n, n)
-  return tokens
-end
-
--- ── the parser ────────────────────────────────────────────────────────────
+-- `[name]`, the name trimmed of spaces and tabs.
+local header = G.seq({
+  G.lit("["),
+  G.expect(
+    G.key(G.bare({ stop = function(sc) return sc:starts("]") end, empty = false })),
+    "a `[section]` header needs a name"
+  ),
+  G.expect(G.lit("]"), "unclosed `[section]` header; expected a `]` before the end of the line"),
+})
 
 -- One layer of matching quotes around the whole value comes off; nothing
 -- inside is decoded.
-local function decode_value(raw)
-  if #raw >= 2 then
-    local q = raw:sub(1, 1)
-    if (q == '"' or q == "'") and raw:sub(-1) == q then return raw:sub(2, -2) end
-  end
+local function unquote(raw)
+  local q = raw:sub(1, 1)
+  if #raw >= 2 and (q == '"' or q == "'") and raw:sub(-1) == q then return raw:sub(2, -2) end
   return raw
 end
 
+local entry = G.entry({
+  key = G.key(G.bare({ stop = function(sc) return sc:starts("=") end, empty = false })),
+  sep = G.lit("="),
+  value = G.bare({ text = unquote }),
+  missing_sep = "expected `=` after this key; every INI line is `key = value`",
+})
+
+-- A header line: the section its name already stands for, re-entered, or a
+-- fresh one under the root. Nothing but spaces may follow the `]`.
+local function section(sc, S, root, key)
+  sc:match("[ \t]*")
+  if not (sc:eof() or sc:starts("\n") or sc:starts("\r")) then
+    sc:fail("unexpected content after `]`; a section header must be alone on its line")
+  end
+  local existing = root.by_key[key.text]
+  if existing then
+    if existing.value.kind ~= "mapping" then
+      fig.fail("this section conflicts with a key of the same name already defined at this level", key.span[1])
+    end
+    S:reopen(existing.value, key.span, "header")
+    return existing.value
+  end
+  S:claim(key, "leading")
+  return S:open(root, fig.entry(key, fig.mapping(key.span)), "header")
+end
+
+-- Line by line: what a header *means* — which section it re-enters, where
+-- the keys after it land — is the parser's, as `G.sections` says.
 function M.parse(_dialect, input)
-  local tokens = tokenize(input)
-  local pos = 1
+  local sc = fig.scanner(input)
+  if sc:starts("\239\187\191") then sc.pos = 3 end
   local S = G.sections(input)
-  local root = fig.mapping({ 0, #input })
+  local ctx = { comment = function(_, c) S:comment(c.text) end }
+  local root = fig.mapping({ 0, sc.n })
   local current = root
-
-  local function peek() return tokens[pos] end
-  local function advance()
-    local t = tokens[pos]
-    if pos < #tokens then pos = pos + 1 end
-    return t
-  end
-  local function text(t) return input:sub(t.s + 1, t.e) end
-  local function skip_blank()
-    while true do
-      local k = peek().kind
-      if k == "comment" then
-        S:comment(text(peek()):match("^[ \t\r]*(.-)[ \t\r]*$"))
-        pos = pos + 1
-      elseif k == "newline" then
-        pos = pos + 1
-      else
-        return
+  while true do
+    trivia(sc, ctx)
+    if sc:eof() then break end
+    local h = header(sc)
+    if h then
+      current = section(sc, S, root, h[2])
+    else
+      local e = entry(sc)
+      if e == nil then
+        sc:fail("unexpected content here; expected a `[section]` header or a `key = value` line")
       end
+      S:claim(e.key, "leading")
+      current:put(e)
     end
-  end
-
-  -- `[name]`: reopen the section when the name was seen, else a fresh
-  -- section under the root.
-  local function section_header()
-    advance() -- [
-    local name_tok = peek()
-    if name_tok.kind ~= "text" then fig.fail(MESSAGES.UnexpectedToken, name_tok.s) end
-    advance()
-    local name = text(name_tok)
-    if peek().kind ~= "close_bracket" then fig.fail(MESSAGES.UnexpectedToken, peek().s) end
-    advance()
-    if name == "" then fig.fail(MESSAGES.InvalidKey, name_tok.s) end
-    local span = { name_tok.s, name_tok.e }
-    local existing = root.by_key[name]
-    if existing then
-      local m = existing.value
-      if m.kind ~= "mapping" then fig.fail(MESSAGES.DuplicateKey, name_tok.s) end
-      S:reopen(m, span, "header")
-      current = m
-    else
-      local key = fig.scalar("string", span, name)
-      S:claim(key, "leading")
-      current = S:open(root, fig.entry(key, fig.mapping(span)), "header")
-    end
-  end
-
-  local function key_value()
-    local key_tok = advance()
-    local name = text(key_tok)
-    if name == "" then fig.fail(MESSAGES.InvalidKey, key_tok.s) end
-    if peek().kind ~= "equals" then fig.fail(MESSAGES.UnexpectedToken, peek().s) end
-    advance()
-    -- `key=` at the line's end has no value token: an empty value there.
-    local raw, span = "", { peek().s, peek().s }
-    if peek().kind == "text" then
-      local value_tok = advance()
-      raw = text(value_tok)
-      span = { value_tok.s, value_tok.e }
-    end
-    local key = fig.scalar("string", { key_tok.s, key_tok.e }, name)
-    S:claim(key, "leading")
-    current:put(fig.entry(key, fig.scalar("string", span, decode_value(raw))))
-  end
-
-  skip_blank()
-  while peek().kind ~= "end_of_file" do
-    local k = peek().kind
-    if k == "open_bracket" then
-      section_header()
-    elseif k == "text" then
-      key_value()
-    else
-      fig.fail(MESSAGES.UnexpectedToken, peek().s)
-    end
-    skip_blank()
   end
   S:claim(current, "dangling")
   return root
@@ -279,59 +179,53 @@ local function write_value(w, row)
   end
 end
 
-local function comment_lines(w, ctx, list)
-  for _, c in ipairs(list) do
-    for line in (c.text .. "\n"):gmatch("(.-)\n") do
-      local t = line:match("^[ \t]*(.-)[ \t]*$")
-      w:put(t == "" and ";" or ("; " .. t), "\n")
-    end
-    ctx.wrote = true
-  end
-end
-
 local function key_text(row)
   if row.kind ~= "string" then error("an INI key must be a string", 0) end
   return row.text or ""
 end
 
-local function kv_line(w, ctx, e)
-  comment_lines(w, ctx, e.key.leading)
-  write_text(w, key_text(e.key))
-  w:put(" = ")
-  write_value(w, e.value)
-  w:put("\n")
-  ctx.wrote = true
-  comment_lines(w, ctx, e.value.trailing)
-end
-
 function M.print(_dialect, t, _options)
   local w = fig.writer()
-  local ctx = { wrote = false }
   local root = t.byid(0)
   if root.kind ~= "mapping" then
     write_value(w, root)
     w:put("\n")
     return w:string()
   end
+  -- Whether anything stands above what comes next: a blank line goes
+  -- between the root's keys and the first section, and between sections.
+  local wrote = false
+  local function comments(list)
+    wrote = w:comments(list, ";") or wrote
+  end
+  local function kv_line(e)
+    comments(e.key.leading)
+    write_text(w, key_text(e.key))
+    w:put(" = ")
+    write_value(w, e.value)
+    w:put("\n")
+    wrote = true
+    comments(e.value.trailing)
+  end
   for _, e in ipairs(root.items) do
-    if e.value.kind ~= "mapping" then kv_line(w, ctx, e) end
+    if e.value.kind ~= "mapping" then kv_line(e) end
   end
   for _, e in ipairs(root.items) do
     if e.value.kind == "mapping" then
-      comment_lines(w, ctx, e.key.leading)
-      if ctx.wrote then w:put("\n") end
+      comments(e.key.leading)
+      if wrote then w:put("\n") end
       w:put("[")
       write_text(w, key_text(e.key))
       w:put("]\n")
-      ctx.wrote = true
+      wrote = true
       for _, inner in ipairs(e.value.items) do
         if inner.value.kind == "mapping" then error("a section inside a section has no INI spelling", 0) end
-        kv_line(w, ctx, inner)
+        kv_line(inner)
       end
-      comment_lines(w, ctx, e.value.dangling)
+      comments(e.value.dangling)
     end
   end
-  comment_lines(w, ctx, root.dangling)
+  comments(root.dangling)
   return w:string()
 end
 

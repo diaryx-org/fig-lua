@@ -1,10 +1,6 @@
 -- dotenv, in Lua: the twin of fig's compiled `dotenv` format, row for row.
 --
--- `fig lang check lua-dotenv --against dotenv <files…>` holds this script to
--- the compiled parser's node table on every file given, and this script is
--- written against `fig lang table -i dotenv`, which prints that table. What
--- the compiled format accepts is stated in fig's `src/languages/dotenv/`,
--- and this follows it line for line:
+-- The format:
 --
 --   * a key is a bash identifier, `[A-Za-z_][A-Za-z0-9_]*`; an `export `
 --     before one is recognized and discarded;
@@ -20,13 +16,12 @@
 --     value; the later key's own leading comments go with it.
 --
 -- Every value is a string: dotenv has no typed scalars and does no `$VAR`
--- interpolation. Spans are byte offsets, 0-based, `[start, end)`.
---
--- The grammar refuses what the compiled parser refuses, in its words and
--- at its offsets, with one difference of order: the compiled tokenizer
--- runs over the whole file before its parser, so on a file with two
--- errors it may report the later one when that is the tokenizer's; this
--- reports the first.
+-- interpolation. The node table is held row for row against the compiled
+-- format — `fig lang table -i dotenv` prints that table, and `fig lang
+-- check lua-dotenv --against dotenv <files…>` compares them file by file.
+-- Every document the compiled format refuses is refused here, in this
+-- script's own words and at its own offsets: the contract is the format,
+-- not the parser. Spans are byte offsets, 0-based, `[start, end)`.
 
 local G = require("fig.grammar")
 
@@ -53,38 +48,19 @@ M.samples = {
 }
 M.renderers = {}
 
--- ── errors, as the compiled parser words them ─────────────────────────────
-
-local MESSAGES = {
-  UnexpectedToken = "unexpected content here; expected `KEY=value` (optionally `export KEY=value`)",
-  MissingEquals = "expected `=` after this key; every dotenv line is `KEY=value`",
-  BadEscape = "invalid escape in a double-quoted value; supported: \\n \\t \\r \\\\ \\\" — use a single-quoted value for raw text with backslashes",
-  InvalidUtf8 = "this file is not valid UTF-8; dotenv documents must be UTF-8 encoded",
-  UnexpectedCarriageReturn = "a bare `\\r` must be followed by `\\n`; line endings must be `\\n` or `\\r\\n`",
-  UnclosedString = "unclosed quoted value; expected a matching `\"`/`'` before the end of the file",
-  UnexpectedChar = "not a valid key here; a dotenv key is a bash identifier (`[A-Za-z_][A-Za-z0-9_]*`)",
-  TrailingContent = "unexpected content after this quoted value; only a `#` comment may follow it on the same line",
-}
-
 -- ── the grammar ───────────────────────────────────────────────────────────
 
--- A bare `\r` is refused wherever the compiled tokenizer meets one.
-local bare_cr = G.fail_if(G.lit("\r"), MESSAGES.UnexpectedCarriageReturn)
+local BARE_CR = "a bare `\\r` must be followed by `\\n`; line endings must be `\\n` or `\\r\\n`"
+local UNCLOSED = "unclosed quoted value; expected a matching `\"`/`'` before the end of the file"
 
--- After a closing quote only spaces, a comment or the line's end may
--- follow. Answers where a bad escape in the value is reported: at the
--- comment's text or the line end, as the compiled parser does.
+-- Only spaces, a `#` comment or the line's end may follow a closing quote.
 local function after_quoted(sc)
   local save = sc.pos
   sc:match("[ \t]*")
-  local at = sc.pos
-  if sc:starts("#") then
-    at = at + 1
-  elseif not (sc:eof() or sc:starts("\n") or sc:starts("\r")) then
-    sc:fail(MESSAGES.TrailingContent)
+  if not (sc:eof() or sc:starts("#") or sc:starts("\n") or sc:starts("\r")) then
+    sc:fail("unexpected content after this quoted value; only a `#` comment may follow it on the same line")
   end
   sc.pos = save
-  return at
 end
 
 local ESCAPES = { n = "\n", t = "\t", r = "\r", ["\\"] = "\\", ['"'] = '"' }
@@ -93,17 +69,12 @@ local value = G.choice({
   G.quoted({
     open = '"',
     escapes = ESCAPES,
-    unclosed = MESSAGES.UnclosedString,
-    bad_escape = MESSAGES.BadEscape,
-    bare_cr = MESSAGES.UnexpectedCarriageReturn,
+    unclosed = UNCLOSED,
+    bad_escape = "invalid escape in a double-quoted value; supported: \\n \\t \\r \\\\ \\\" — use a single-quoted value for raw text with backslashes",
+    bare_cr = BARE_CR,
     after = after_quoted,
   }),
-  G.quoted({
-    open = "'",
-    unclosed = MESSAGES.UnclosedString,
-    bare_cr = MESSAGES.UnexpectedCarriageReturn,
-    after = after_quoted,
-  }),
+  G.quoted({ open = "'", unclosed = UNCLOSED, bare_cr = BARE_CR, after = after_quoted }),
   -- Unquoted: to the line's end, or to a `#` that a space or tab
   -- precedes — the one right after `=` counts, since `A= #c` is empty.
   G.bare({
@@ -121,24 +92,25 @@ local entry = G.entry({
   key = G.key(G.pat("[A-Za-z_][A-Za-z0-9_]*")),
   sep = G.lit("="),
   value = value,
-  missing_sep = MESSAGES.MissingEquals,
+  missing_sep = "expected `=` after this key; every dotenv line is `KEY=value`",
 })
 
 M.parse = G.document({
-  utf8 = MESSAGES.InvalidUtf8,
+  utf8 = "this file is not valid UTF-8; dotenv documents must be UTF-8 encoded",
   bom = true,
   root = G.map({
     whole = true,
     entry = entry,
     trivia = G.trivia({
-      space = G.choice({ G.hs1, G.eol, bare_cr }),
+      space = G.choice({ G.hs1, G.eol, G.fail_if(G.lit("\r"), BARE_CR) }),
       comment = G.comment("#"),
     }),
-    -- Where a key should be: `=` is a token the compiled parser refuses;
-    -- anything else is a byte its tokenizer refuses.
+    -- Where a key should be.
     otherwise = function(sc)
-      if sc:starts("=") then sc:fail(MESSAGES.UnexpectedToken) end
-      sc:fail(MESSAGES.UnexpectedChar)
+      if sc:starts("=") then
+        sc:fail("unexpected content here; expected `KEY=value` (optionally `export KEY=value`)")
+      end
+      sc:fail("not a valid key here; a dotenv key is a bash identifier (`[A-Za-z_][A-Za-z0-9_]*`)")
     end,
   }),
 })
@@ -185,13 +157,6 @@ local function write_value(w, row)
   end
 end
 
-local function comment_lines(w, c)
-  for line in (c.text .. "\n"):gmatch("(.-)\n") do
-    local trimmed = line:match("^[ \t]*(.-)[ \t]*$")
-    w:put(trimmed == "" and "#\n" or ("# " .. trimmed .. "\n"))
-  end
-end
-
 function M.print(_dialect, t, _options)
   local w = fig.writer()
   local root = t.byid(0)
@@ -206,7 +171,7 @@ function M.print(_dialect, t, _options)
     if not is_identifier(key.text or "") then
       error("`" .. (key.text or "") .. "` is not a dotenv key; a key is a bash identifier", 0)
     end
-    for _, c in ipairs(key.leading) do comment_lines(w, c) end
+    w:comments(key.leading, "#")
     w:put(key.text, "=")
     write_value(w, value)
     local trailing = value.trailing[1]
@@ -216,7 +181,7 @@ function M.print(_dialect, t, _options)
     end
     w:put("\n")
   end
-  for _, c in ipairs(root.dangling) do comment_lines(w, c) end
+  w:comments(root.dangling, "#")
   return w:string()
 end
 

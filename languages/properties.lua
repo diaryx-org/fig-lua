@@ -1,12 +1,8 @@
 -- Java `.properties`, in Lua: the twin of fig's compiled `properties`
 -- format, row for row.
 --
--- `fig lang check lua-properties --against properties <files…>` holds this
--- script to the compiled parser's node table on every file given, and
--- this script is written against `fig lang table -i properties`, which
--- prints that table. What the compiled format accepts is stated in fig's
--- `src/languages/properties/`, and this follows it — `java.util.Properties
--- .load` as documented, not INI or dotenv re-skinned:
+-- The format — `java.util.Properties.load` as documented, not INI or
+-- dotenv re-skinned:
 --
 --   * a logical line is `key`, then the first unescaped `=`, `:` or run
 --     of spaces and tabs, then the value to the line's end; `a=b`, `a:b`,
@@ -23,12 +19,15 @@
 --   * a repeated key keeps the first entry's place and takes the last
 --     value; the later key's own leading comments go with it.
 --
--- Every value is a string: the format has no typed scalars. Spans are
--- byte offsets, 0-based, `[start, end)`. The refusals are the compiled
--- parser's, in its words and at its offsets: a bad `\uXXXX` is reported
--- where the token after the offending one begins, as the compiled parser
--- decodes a token once it has moved past it. The one warning (a
--- duplicate key) has no row and is not carried.
+-- Every value is a string: the format has no typed scalars. The node
+-- table is held row for row against the compiled format — `fig lang table
+-- -i properties` prints that table, and `fig lang check lua-properties
+-- --against properties <files…>` compares them file by file. Every
+-- document the compiled format refuses is refused here, in this script's
+-- own words and at its own offsets: the contract is the format, not the
+-- parser. Spans are byte offsets, 0-based, `[start, end)`.
+
+local G = require("fig.grammar")
 
 local M = {}
 
@@ -54,197 +53,115 @@ M.samples = {
 }
 M.renderers = {}
 
--- ── errors, as the compiled parser words them ─────────────────────────────
+-- ── the grammar ───────────────────────────────────────────────────────────
+-- A form feed counts as inline whitespace, and so as a separator.
 
-local MESSAGES = {
-  InvalidUnicode = "invalid \\uXXXX escape; expected exactly 4 hex digits forming a valid Unicode codepoint",
-  InvalidUtf8 = "this file is not valid UTF-8; fig requires .properties documents to be UTF-8 encoded",
-  UnexpectedCarriageReturn = "a bare `\\r` must be followed by `\\n`; line endings must be `\\n` or `\\r\\n`",
-  UnclosedEscape = "a `\\` at the very end of the file has nothing to escape",
-}
+local hs = G.pat("[ \t\f]*")
+local hs1 = G.pat("[ \t\f]+")
 
--- ── the tokenizer ─────────────────────────────────────────────────────────
--- Tokens are `{ kind=, s=, e= }` over 0-based byte offsets: `key`, `value`
--- (both raw, decoded by the parser; a value follows every key), `comment`
--- (the text after its leader), `newline`, `end_of_file`.
-
-local function is_inline_ws(b)
-  return b == 32 or b == 9 or b == 12
+local function is_separator(c)
+  return c == 61 or c == 58 or c == 32 or c == 9 or c == 12
 end
 
-local function is_separator(b)
-  return b == 61 or b == 58 or is_inline_ws(b)
-end
-
-local function tokenize(src)
-  local n = #src
-  local i = 0
-  local tokens = {}
-  local function at(k) return src:byte(k + 1) end
-  local function emit(kind, s, e) tokens[#tokens + 1] = { kind = kind, s = s, e = e } end
-
-  local function skip_continuation_ws()
-    while i < n and (at(i) == 32 or at(i) == 9) do i = i + 1 end
-  end
-
-  -- An escape-aware run: a `\` protects the byte after it, a `\` before a
-  -- line ending joins the next line on. Stops before the first unescaped
-  -- separator in `key_mode`, else at the logical line's end.
-  local function scan_escaped(key_mode)
+-- An escape-aware run: a `\` protects the byte after it, and a `\` before
+-- a line ending is a continuation — the run goes on into the next line,
+-- past its leading spaces and tabs. In `key_mode` it stops before the
+-- first unescaped separator, otherwise at the line's end. Always matches,
+-- and may be empty: a value is zero-width where one would begin.
+local function run(key_mode)
+  return function(sc)
+    local src, n = sc.src, sc.n
+    local s = sc.pos
+    local i = s
     while i < n do
-      local c = at(i)
-      if c == 10 or c == 13 then return end
+      local c = src:byte(i + 1)
+      if c == 10 or c == 13 then break end
       if c == 92 then
-        if i + 1 < n and at(i + 1) == 10 then
+        if i + 1 >= n then fig.fail("a `\\` at the very end of the file has nothing to escape", i) end
+        local skip = true
+        if src:byte(i + 2) == 10 then
           i = i + 2
-          skip_continuation_ws()
-        elseif i + 2 < n and at(i + 1) == 13 and at(i + 2) == 10 then
+        elseif src:byte(i + 2) == 13 and src:byte(i + 3) == 10 then
           i = i + 3
-          skip_continuation_ws()
-        elseif i + 1 >= n then
-          fig.fail(MESSAGES.UnclosedEscape, i)
         else
           i = i + 2
+          skip = false
+        end
+        if skip then
+          while i < n and (src:byte(i + 1) == 32 or src:byte(i + 1) == 9) do i = i + 1 end
         end
       elseif key_mode and is_separator(c) then
-        return
+        break
       else
         i = i + 1
       end
     end
+    sc.pos = i
+    return { s, i }
   end
-
-  if src:sub(1, 3) == "\239\187\191" then i = 3 end
-  while i < n do
-    while i < n and is_inline_ws(at(i)) do i = i + 1 end
-    if i >= n then break end
-    local c = at(i)
-    if c == 10 then
-      emit("newline", i, i + 1)
-      i = i + 1
-    elseif c == 13 then
-      if i + 1 < n and at(i + 1) == 10 then
-        emit("newline", i, i + 2)
-        i = i + 2
-      else
-        fig.fail(MESSAGES.UnexpectedCarriageReturn, i)
-      end
-    elseif c == 35 or c == 33 then
-      i = i + 1
-      local s = i
-      while i < n and at(i) ~= 10 and at(i) ~= 13 do i = i + 1 end
-      emit("comment", s, i)
-    else
-      local key_start = i
-      scan_escaped(true)
-      emit("key", key_start, i)
-      while i < n and is_inline_ws(at(i)) do i = i + 1 end
-      if i < n and (at(i) == 61 or at(i) == 58) then
-        i = i + 1
-        while i < n and is_inline_ws(at(i)) do i = i + 1 end
-      end
-      -- Always a value: zero-width where one would begin when nothing
-      -- follows.
-      local value_start = i
-      if i < n and at(i) ~= 10 and at(i) ~= 13 then scan_escaped(false) end
-      emit("value", value_start, i)
-    end
-  end
-  emit("end_of_file", n, n)
-  return tokens
 end
-
--- ── decoding ──────────────────────────────────────────────────────────────
 
 local SIMPLE = { t = "\t", n = "\n", r = "\r", f = "\12" }
 
--- The text of a raw key or value token; `fail_at` is where a bad
--- `\uXXXX` is reported.
-local function decode_escaped(raw, fail_at)
-  if not raw:find("\\", 1, true) then return raw end
+-- The text a run spells; a refusal lands on the escape itself.
+local function decode(sc, span)
+  local raw = sc:slice(span[1], span[2])
   local out = {}
-  local i = 1
-  local n = #raw
+  local i, n = 1, #raw
   while i <= n do
     local c = raw:sub(i, i)
+    local next_c = raw:sub(i + 1, i + 1)
     if c ~= "\\" then
       out[#out + 1] = c
       i = i + 1
-    elseif raw:sub(i + 1, i + 1) == "\n" then
-      i = i + 2
+    elseif next_c == "\n" or raw:sub(i + 1, i + 2) == "\r\n" then
+      i = i + (next_c == "\n" and 2 or 3)
       while i <= n and (raw:sub(i, i) == " " or raw:sub(i, i) == "\t") do i = i + 1 end
-    elseif raw:sub(i + 1, i + 2) == "\r\n" then
-      i = i + 3
-      while i <= n and (raw:sub(i, i) == " " or raw:sub(i, i) == "\t") do i = i + 1 end
-    else
-      local ch = raw:sub(i + 1, i + 1)
-      if SIMPLE[ch] then
-        out[#out + 1] = SIMPLE[ch]
-      elseif ch == "u" then
-        local hex = raw:sub(i + 2, i + 5)
-        if #hex < 4 or not hex:match("^%x%x%x%x$") then fig.fail(MESSAGES.InvalidUnicode, fail_at) end
-        local cp = tonumber(hex, 16)
-        if cp >= 0xD800 and cp <= 0xDFFF then fig.fail(MESSAGES.InvalidUnicode, fail_at) end
-        out[#out + 1] = utf8.char(cp)
-        i = i + 4
-      else
-        out[#out + 1] = ch
+    elseif next_c == "u" then
+      local hex = raw:sub(i + 2, i + 5)
+      local cp = hex:match("^%x%x%x%x$") and tonumber(hex, 16) or nil
+      if cp == nil or fig.is_surrogate(cp) then
+        fig.fail("invalid `\\u` escape; expected four hex digits spelling a character", span[1] + i - 1)
       end
+      out[#out + 1] = utf8.char(cp)
+      i = i + 6
+    else
+      out[#out + 1] = SIMPLE[next_c] or next_c
       i = i + 2
     end
   end
   return table.concat(out)
 end
 
--- ── the parser ────────────────────────────────────────────────────────────
-
-function M.parse(_dialect, input)
-  local ok, bad = utf8.len(input)
-  if not ok then fig.fail(MESSAGES.InvalidUtf8, bad and bad - 1 or nil) end
-  local tokens = tokenize(input)
-  local pos = 1
-  local pending = {}
-  local root = fig.mapping({ 0, #input })
-
-  local function peek() return tokens[pos] end
-  local function advance()
-    local t = tokens[pos]
-    if pos < #tokens then pos = pos + 1 end
-    return t
-  end
-  local function text(t) return input:sub(t.s + 1, t.e) end
-  local function claim(node, slot)
-    for _, c in ipairs(pending) do node:comment(slot, c) end
-    pending = {}
-  end
-  local function skip_blank()
-    while true do
-      local k = peek().kind
-      if k == "comment" then
-        pending[#pending + 1] = text(peek()):match("^[ \t\r]*(.-)[ \t\r]*$")
-        pos = pos + 1
-      elseif k == "newline" then
-        pos = pos + 1
-      else
-        return
-      end
-    end
-  end
-
-  skip_blank()
-  while peek().kind ~= "end_of_file" do
-    local key_tok = advance()
-    local name = decode_escaped(text(key_tok), peek().s)
-    local value_tok = advance()
-    local value_text = decode_escaped(text(value_tok), peek().s)
-    local key = fig.scalar("string", { key_tok.s, key_tok.e }, name)
-    claim(key, "leading")
-    root:put(fig.entry(key, fig.scalar("string", { value_tok.s, value_tok.e }, value_text)))
-    skip_blank()
-  end
-  claim(root, "dangling")
-  return root
+local function text(raw, span, sc)
+  if raw:find("\\", 1, true) then return decode(sc, span) end
+  return raw
 end
+
+local entry = G.entry({
+  key = G.key(run(true), { text = text }),
+  between = hs,
+  -- Any run of inline whitespace separates; one `=` or `:` may join it.
+  sep = G.opt(G.pat("[=:]")),
+  value = G.scalar("string", run(false), { text = text }),
+})
+
+M.parse = G.document({
+  utf8 = "this file is not valid UTF-8; fig requires .properties documents to be UTF-8 encoded",
+  bom = true,
+  root = G.map({
+    whole = true,
+    entry = entry,
+    trivia = G.trivia({
+      space = G.choice({
+        hs1,
+        G.eol,
+        G.fail_if(G.lit("\r"), "a bare `\\r` must be followed by `\\n`; line endings must be `\\n` or `\\r\\n`"),
+      }),
+      comment = G.choice({ G.comment("#"), G.comment("!") }),
+    }),
+  }),
+})
 
 -- ── the printer ───────────────────────────────────────────────────────────
 -- Canonical `.properties`, as the compiled printer writes it: one
@@ -304,13 +221,6 @@ local function write_value(w, row)
   end
 end
 
-local function comment_lines(w, c)
-  for line in (c.text .. "\n"):gmatch("(.-)\n") do
-    local trimmed = line:match("^[ \t]*(.-)[ \t]*$")
-    w:put(trimmed == "" and "#\n" or ("# " .. trimmed .. "\n"))
-  end
-end
-
 function M.print(_dialect, t, _options)
   local w = fig.writer()
   local root = t.byid(0)
@@ -323,13 +233,13 @@ function M.print(_dialect, t, _options)
   for _, kv in ipairs(root.items) do
     local key, value = kv.key, kv.value
     if key.kind ~= "string" then error("a .properties key must be a string", 0) end
-    for _, c in ipairs(key.leading) do comment_lines(w, c) end
+    w:comments(key.leading, "#")
     write_key(w, key.text or "")
     w:put("=")
     write_value(w, value)
     w:put("\n")
   end
-  for _, c in ipairs(root.dangling) do comment_lines(w, c) end
+  w:comments(root.dangling, "#")
   return w:string()
 end
 
