@@ -47,6 +47,7 @@ elsewhere:
 - json.lua, the twin of fig's compiled json format ([`e5b7fdd`](https://github.com/diaryx-org/fig-lua/commit/e5b7fdd328f3c32970a1b131fbdf4b12eb21b193))
 - toml.lua, the twin of fig's compiled toml format ([`d9b1cbd`](https://github.com/diaryx-org/fig-lua/commit/d9b1cbde1f54cb289cb2fbc06856361b7c69820b))
 - ini.lua, the twin of fig's compiled ini format ([`bfa66a6`](https://github.com/diaryx-org/fig-lua/commit/bfa66a6836a307a47ff1f68ab9a578e2d916647f))
+- fig.lua, the twin of fig's own authoring dialect ([`5c79e44`](https://github.com/diaryx-org/fig-lua/commit/5c79e443d679a59d14bdc548206008102522a0a3))
 
 ### Fixed
 
