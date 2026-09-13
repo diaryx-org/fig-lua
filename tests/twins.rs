@@ -63,6 +63,10 @@ fn fixtures(format: &str, ext: &str) -> Vec<(String, Vec<u8>, Value)> {
         if path.extension().and_then(|e| e.to_str()) != Some(ext) {
             continue;
         }
+        // A JSON twin's fixtures share the table's extension.
+        if path.to_string_lossy().ends_with(".table.json") {
+            continue;
+        }
         let source = std::fs::read(&path).unwrap();
         let table_path = path.with_extension("table.json");
         let table_json = std::fs::read(&table_path)
@@ -215,6 +219,146 @@ fn dotenv_edits_as_the_compiled_format_does() {
     }
     assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
     assert!(mine.source().unwrap().contains("# the key\nAPI_KEY="));
+}
+
+/// One registration per process: a name can be registered once.
+fn lua_json() -> Format {
+    static FORMAT: OnceLock<Format> = OnceLock::new();
+    *FORMAT.get_or_init(|| fig::language::register(script("json.lua")).expect("registers")[0])
+}
+
+#[test]
+fn json_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("json.lua");
+    for (name, source, want) in fixtures("json", "json") {
+        let table = lang
+            .parse("lua-json", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+            fig::helper::encode(&canonical(&got)),
+            fig::helper::encode(&canonical(&want)),
+        );
+    }
+}
+
+#[test]
+fn json_registers_and_is_the_compiled_format_at_every_entry_point() {
+    let mine_fmt = lua_json();
+    assert!(matches!(mine_fmt, Format::Runtime(_)));
+    assert_eq!(Format::by_name("lua-json"), Some(mine_fmt));
+
+    for (name, source, _) in fixtures("json", "json") {
+        let mine = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let theirs = Document::parse(&source, Format::Json).unwrap();
+        // The same tree: both print the same through the compiled printer
+        // and through the script's, and the script's printer is the
+        // compiled one's, byte for byte.
+        assert_eq!(
+            mine.serialize(Format::Json).unwrap(),
+            theirs.serialize(Format::Json).unwrap(),
+            "{name}: trees differ"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(mine_fmt).unwrap(),
+            "{name}: the script prints the two trees differently"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(Format::Json).unwrap(),
+            "{name}: the script's printer differs from the compiled one"
+        );
+        assert_eq!(mine.to_value().unwrap(), theirs.to_value().unwrap());
+    }
+}
+
+#[test]
+fn json_refuses_what_the_compiled_format_refuses_with_its_words_and_offset() {
+    // The compiled tokenizer's refusals, at the offsets the `fig` CLI
+    // reports for them (`fig get bad.json -i json`); nearly every one is
+    // its one `unexpected token` message.
+    let mine = lua_json();
+    const UNEXPECTED: &str =
+        "unexpected token here; check for a missing comma, colon, key, or closing bracket/brace";
+    const ENDED: &str = "the document ended before this value/token was complete";
+    for (bad, message, offset) in [
+        (&b"[1,]"[..], UNEXPECTED, 3),
+        (b"[1 2]", UNEXPECTED, 3),
+        (b"{\"a\" 1}", UNEXPECTED, 5),
+        (b"{a: 1}", UNEXPECTED, 1),
+        (b"{\"a\":1", UNEXPECTED, 6),
+        (b"{\"a\":1}{", UNEXPECTED, 7),
+        (b"\"\\q\"", UNEXPECTED, 2),
+        (b"\"\\u12g4\"", UNEXPECTED, 5),
+        (b"\"ab\ncd\"", UNEXPECTED, 3),
+        (b"nul", UNEXPECTED, 0),
+        (b"-x", UNEXPECTED, 1),
+        (
+            b"01",
+            "a number cannot have a leading zero; write the digits without the padding, or quote it as a string to keep the padding (e.g. a zip code)",
+            1,
+        ),
+        (b"1.", ENDED, 2),
+        (b"1e", ENDED, 2),
+        (
+            b"\"abc",
+            "unclosed string; a JSON string cannot span multiple lines — add the closing quote, or escape the newline as `\\n`",
+            4,
+        ),
+    ] {
+        assert!(
+            Document::parse(bad, Format::Json).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                // Offset 0 is "unknown" at the C ABI, so it comes back as
+                // `None`: the one offset the binding cannot carry.
+                let want = if offset == 0 { None } else { Some(offset) };
+                assert_eq!(e.byte_offset, want, "{}", String::from_utf8_lossy(bad));
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn json_edits_as_the_compiled_format_does() {
+    let mine_fmt = lua_json();
+    let src = b"{\n  \"name\": \"fig\",\n  \"formats\": [\"json\", \"yaml\"],\n  \"runtime\": {\"lua\": true},\n  \"gone\": null\n}\n";
+    let mut mine = Editor::open(src, mine_fmt).unwrap();
+    let mut theirs = Editor::open(src, Format::Json).unwrap();
+    for ed in [&mut mine, &mut theirs] {
+        ed.replace_value(&[Segment::Key("name")], "fig 3").unwrap();
+        ed.insert_value(&[Segment::Key("runtime")], "js", true)
+            .unwrap();
+        ed.append_value(&[Segment::Key("formats")], "toml").unwrap();
+        ed.delete(&[Segment::Key("gone")]).unwrap();
+        ed.remove_item(&[Segment::Key("formats")], 0).unwrap();
+        ed.set_value(&[Segment::Key("count")], 3i64).unwrap();
+    }
+    assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
+    let out = mine.source().unwrap();
+    assert!(out.contains("\"name\": \"fig 3\""), "{out}");
+    assert!(out.contains("[\"yaml\", \"toml\"]"), "{out}");
+    assert!(!out.contains("gone"), "{out}");
+    // A flow root edited by comma-aware splice, as the compiled format's
+    // is: the root of a runtime language is not a section root.
+    let list = b"[1, 2, 3]\n";
+    let mut mine = Editor::open(list, mine_fmt).unwrap();
+    let mut theirs = Editor::open(list, Format::Json).unwrap();
+    for ed in [&mut mine, &mut theirs] {
+        ed.remove_item(&[], 1).unwrap();
+        ed.append_value(&[], 4i64).unwrap();
+    }
+    assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
+    assert_eq!(mine.source().unwrap(), "[1, 3, 4]\n");
 }
 
 #[test]

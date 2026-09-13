@@ -25,9 +25,12 @@ lua-dotenv: registered (read edit serialize); every sample parsed, printed and r
 secrets.env: same table as `dotenv` (13 rows)
 ```
 
-Three scripts ship in `languages/`, each the twin of a format fig compiles
+Four scripts ship in `languages/`, each the twin of a format fig compiles
 in and held to it row for row:
 
+- `json.lua` — strict JSON, RFC 8259: the values, the escapes with
+  surrogate pairs, the byte-order mark, no comments; the format everyone
+  already knows, so the one to read first.
 - `dotenv.lua` — `.env` files: bash-identifier keys, an optional `export`,
   quoted and unquoted values, `#` comments, flat.
 - `plist.lua` — Apple property lists, the XML form: `dict`, `array`, typed
