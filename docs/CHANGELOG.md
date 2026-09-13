@@ -58,6 +58,7 @@ elsewhere:
 - **languages** — nestedtext.lua, the twin of fig's compiled NestedText ([`5475902`](https://github.com/diaryx-org/fig-lua/commit/5475902d39f91f1265e08b3dd5b7bb8c52826d22))
 - **prelude** — a table records its tag directives ([`005a0a0`](https://github.com/diaryx-org/fig-lua/commit/005a0a0a79ca081f9fd9ab8c3a31d90840484823))
 - **languages** — yaml.lua, the twin of fig's compiled YAML ([`939b4d2`](https://github.com/diaryx-org/fig-lua/commit/939b4d2df25b870d32cd3b059ef530492c8ca2f3))
+- **lib** — `fig.number`, `fig.datetime`, and the helpers the twins share ([`2cf6ad3`](https://github.com/diaryx-org/fig-lua/commit/2cf6ad377ac0087ebaf423ebdca78230c8d679b7))
 
 ### Fixed
 
@@ -67,6 +68,13 @@ elsewhere:
 ### Changed
 
 - **languages** — rebase ini, toml and fig on `G.sections` ([`f2ba1a6`](https://github.com/diaryx-org/fig-lua/commit/f2ba1a6335028c5ea0d8ec4a27dc5512d9bfb685))
+- **languages** — nestedtext.lua held to the format, not the compiled parser ([`f66bf43`](https://github.com/diaryx-org/fig-lua/commit/f66bf4315c77552373193669fea70dde86e8c1ae))
+- **languages** — fig, json, canonical and plist take the shared helpers ([`44b23ea`](https://github.com/diaryx-org/fig-lua/commit/44b23ea661841add4d08efe9303da6feccf6ff25))
+- **languages** — ini and properties as grammars; dotenv trimmed ([`cd0789e`](https://github.com/diaryx-org/fig-lua/commit/cd0789ec1c17377e33f371909b11a4a6940dfee6))
+- **languages** — json5.lua as a grammar ([`00f2e35`](https://github.com/diaryx-org/fig-lua/commit/00f2e35cdc2c7971e387c2012b627d03e326556b))
+- **languages** — toml.lua held to the format, not the compiled parser ([`0385abd`](https://github.com/diaryx-org/fig-lua/commit/0385abd179356898e9d37b6d59357ff35300af25))
+- **languages** — zon.lua as a grammar over the format, not a port of Zig's parser ([`cf25a27`](https://github.com/diaryx-org/fig-lua/commit/cf25a276077fac101cf2cf33835acd47c9f5c967))
+- **languages** — yaml.lua held to the format, not the compiled parser ([`b9701e0`](https://github.com/diaryx-org/fig-lua/commit/b9701e03d64851147b3ea4cb937a8d0e177dd09a))
 
 ### Behavioural changes
 
@@ -81,5 +89,10 @@ elsewhere:
 - `plist.lua` no longer types a bare value by its own rules but by fig's, as handed in; where the two agreed nothing changes, and a host that calls `render` directly must pass `literal` for a value to be typed — absent, it is a string.
 
 - a script whose grammar puts a null or container key into a `G.map` (or calls `map:put` with one) no longer fails with `table index is nil`; the entry is kept under every duplicate policy.
+
+- a `\x`, `\u` or `\U` escape in a double-quoted
+scalar now takes exactly its hex digits; `"\u0_41"` and `"\u+041"`, which
+the compiled parser's parseInt accepted, are refused as YAML refuses
+them.
 
 <!-- git-cliff:end -->
