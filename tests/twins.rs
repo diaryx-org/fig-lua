@@ -1147,3 +1147,251 @@ fn a_parse_that_raises_is_a_language_error() {
         ("not here", Some(3))
     );
 }
+
+/// One registration per process: a name can be registered once.
+fn lua_properties() -> Format {
+    static FORMAT: OnceLock<Format> = OnceLock::new();
+    *FORMAT.get_or_init(|| fig::language::register(script("properties.lua")).expect("registers")[0])
+}
+
+#[test]
+fn properties_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("properties.lua");
+    for (name, source, want) in fixtures("properties", "properties") {
+        let table = lang
+            .parse("lua-properties", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+            fig::helper::encode(&canonical(&got)),
+            fig::helper::encode(&canonical(&want)),
+        );
+    }
+}
+
+#[test]
+fn properties_registers_and_is_the_compiled_format_at_every_entry_point() {
+    let mine_fmt = lua_properties();
+    assert!(matches!(mine_fmt, Format::Runtime(_)));
+    assert_eq!(Format::by_name("lua-properties"), Some(mine_fmt));
+
+    for (name, source, _) in fixtures("properties", "properties") {
+        let mine = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let theirs = Document::parse(&source, Format::Properties).unwrap();
+        assert_eq!(
+            mine.serialize(Format::Properties).unwrap(),
+            theirs.serialize(Format::Properties).unwrap(),
+            "{name}: trees differ"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(mine_fmt).unwrap(),
+            "{name}: the script prints the two trees differently"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(Format::Properties).unwrap(),
+            "{name}: the script's printer differs from the compiled one"
+        );
+        assert_eq!(mine.to_value().unwrap(), theirs.to_value().unwrap());
+    }
+}
+
+#[test]
+fn properties_refuses_what_the_compiled_format_refuses_with_its_words_and_offset() {
+    // The compiled parser's messages, at the offsets the `fig` CLI reports
+    // for them (`fig get bad.properties -i properties`). A bad `\uXXXX` is
+    // reported where the next token begins — the line's end — since the
+    // compiled parser decodes a token once it has moved past it.
+    let mine = lua_properties();
+    const UNICODE: &str =
+        "invalid \\uXXXX escape; expected exactly 4 hex digits forming a valid Unicode codepoint";
+    for (bad, message, offset) in [
+        (&b"a=\\u00zz\n"[..], UNICODE, 8),
+        (b"a=\\uD800\n", UNICODE, 8),
+        (b"a=\\u00E\n", UNICODE, 7),
+        (b"a\\u00zz=1\n", UNICODE, 8),
+        (b"ok=1\nbad=\\uXYZW\nlater=2\n", UNICODE, 15),
+        (
+            b"a=b\\",
+            "a `\\` at the very end of the file has nothing to escape",
+            3,
+        ),
+        (
+            b"a=b\rc\n",
+            "a bare `\\r` must be followed by `\\n`; line endings must be `\\n` or `\\r\\n`",
+            3,
+        ),
+    ] {
+        assert!(
+            Document::parse(bad, Format::Properties).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                assert_eq!(
+                    e.byte_offset,
+                    Some(offset),
+                    "{}",
+                    String::from_utf8_lossy(bad)
+                );
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn properties_edits_as_the_compiled_format_does() {
+    // A flat format's editing surface: a value replaced, one that needs
+    // escaping, a key inserted, a key deleted, a comment placed.
+    let mine_fmt = lua_properties();
+    let src = b"# top\nroot = 1\nq: quoted value\nflag\nesc\\:k=v\\tx\n";
+    let mut mine = Editor::open(src, mine_fmt).unwrap();
+    let mut theirs = Editor::open(src, Format::Properties).unwrap();
+    for ed in [&mut mine, &mut theirs] {
+        ed.replace_value(&[Segment::Key("q")], "x y").unwrap();
+        ed.set_value(&[Segment::Key("flag")], " lead\ttab").unwrap();
+        ed.insert_value(&[], "new", "a:b=c").unwrap();
+        ed.set_value(&[Segment::Key("root")], 2i64).unwrap();
+        ed.add_leading_comment(&[Segment::Key("esc:k")], "the k")
+            .unwrap();
+        ed.delete(&[Segment::Key("q")]).unwrap();
+    }
+    assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
+    let out = mine.source().unwrap();
+    assert!(!out.contains("quoted"), "{out}");
+    assert!(out.contains("new=a:b=c"), "{out}");
+    assert!(out.contains("# the k\nesc\\:k=v\\tx"), "{out}");
+    assert!(out.contains("flag=\\ lead\\ttab"), "{out}");
+}
+
+/// One registration per process: a name can be registered once.
+fn lua_zon() -> Format {
+    static FORMAT: OnceLock<Format> = OnceLock::new();
+    *FORMAT.get_or_init(|| fig::language::register(script("zon.lua")).expect("registers")[0])
+}
+
+/// A file beside the fixtures that is not itself a fixture: what the
+/// compiled format made of one, recorded by the `fig` CLI.
+fn zon_recorded(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/zon")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing", path.display()))
+}
+
+#[test]
+fn zon_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("zon.lua");
+    for (name, source, want) in fixtures("zon", "zon") {
+        let table = lang
+            .parse("lua-zon", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+            fig::helper::encode(&canonical(&got)),
+            fig::helper::encode(&canonical(&want)),
+        );
+    }
+}
+
+#[test]
+fn zon_registers_and_prints_every_fixture_as_the_compiled_printer_did() {
+    // ZON is not in fig's default feature set, so the compiled sibling is
+    // not here to compare against in-process; `fig lang check lua-zon
+    // --against zon` is that comparison. What the compiled printer made of
+    // each fixture is recorded beside it (`fig fmt --dry-run -i zon`), and
+    // the script's printer is held to those bytes.
+    let mine_fmt = lua_zon();
+    assert!(matches!(mine_fmt, Format::Runtime(_)));
+    assert_eq!(Format::by_name("lua-zon"), Some(mine_fmt));
+    for (name, source, _) in fixtures("zon", "zon") {
+        let doc = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let want = zon_recorded(&name.replace(".zon", ".printed"));
+        assert_eq!(doc.serialize(mine_fmt).unwrap(), want, "{name}");
+    }
+}
+
+#[test]
+fn zon_refuses_what_the_compiled_format_refuses_in_its_words() {
+    // The compiled parser has two refusals and no offsets: `InvalidZon`
+    // for what Zig's parser refuses or a literal that does not decode,
+    // `UnsupportedZon` for Zig that ZON is not — as `fig get bad.zon -i
+    // zon` reports them. Which of the two a file gets is decided in
+    // document order, as the walk meets things.
+    let mine = lua_zon();
+    for (bad, message) in [
+        (&b".{ .a = }"[..], "InvalidZon"),
+        (b"", "InvalidZon"),
+        (b"// only\n", "InvalidZon"),
+        (b".{ .a = 1 .b = 2 }", "InvalidZon"),
+        (b".{ .a = 1", "InvalidZon"),
+        (b".{ 1, .a = 2 }", "InvalidZon"),
+        (b".{ .a = 1 } .{}", "InvalidZon"),
+        (b".{ .a = \"\\q\" }", "InvalidZon"),
+        (b".{ .a = 'ab' }", "InvalidZon"),
+        (b".{ .a = \"\\u{D800}\" }", "InvalidZon"),
+        (b".{ .a = 1 +2 }", "InvalidZon"),
+        (b"/// doc\n.{}", "InvalidZon"),
+        (b".{ .a = /* c */ 1 }", "InvalidZon"),
+        (b".{ .a = \"tab\there\" }", "InvalidZon"),
+        (b".{ .a = foo }", "UnsupportedZon"),
+        (b".{ .a = undefined }", "UnsupportedZon"),
+        (b".{ .a = 1 + 2 }", "UnsupportedZon"),
+        (b".{ .a = @import(\"x\") }", "UnsupportedZon"),
+        (b".{ .a = --1 }", "UnsupportedZon"),
+        (b".{ .a = -(1) }", "UnsupportedZon"),
+        (b".{ 1, 2 }.len", "UnsupportedZon"),
+        (b".{ .a = [_]u8{1} }", "UnsupportedZon"),
+        (b".{ .a = if (x) 1 else 2 }", "UnsupportedZon"),
+        // Document order decides: the unsupported node comes first here,
+        // the undecodable literal first there.
+        (b".{ .a = foo, .b = \"\\q\" }", "UnsupportedZon"),
+        (b".{ .a = \"\\q\", .b = foo }", "InvalidZon"),
+    ] {
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                assert_eq!(e.byte_offset, None, "{}", String::from_utf8_lossy(bad));
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn zon_edits_as_the_compiled_format_did() {
+    // A flow format's editing surface with a key sigil, against the bytes
+    // the compiled editor produced for the same edits (`edited.expected`,
+    // from the `fig` CLI): a value replaced, a key inserted — spelled
+    // `.new` — one deleted from a one-line struct with its `.`, a list
+    // item, a comment.
+    let mine_fmt = lua_zon();
+    let src = b"// top\n.{\n    .root = 1, // t\n    .server = .{ // head\n        .host = \"h\",\n        .tags = .{ .a, .b },\n    },\n    .list = .{ 1, 2, 3 },\n    .flat = .{ .a = 1, .b = 2 },\n}\n";
+    let mut ed = Editor::open(src, mine_fmt).unwrap();
+    // Values, spelled by the script's printer: a string gets its quotes,
+    // a key its `.` — the binding hands the editor the key's NAME.
+    ed.replace_value(&[Segment::Key("server"), Segment::Key("host")], "h2")
+        .unwrap();
+    ed.insert_value(&[Segment::Key("server")], "new", true)
+        .unwrap();
+    ed.set_value(&[Segment::Key("root")], 2i64).unwrap();
+    ed.replace_value(&[Segment::Key("list"), Segment::Index(1)], 9i64)
+        .unwrap();
+    ed.delete(&[Segment::Key("flat"), Segment::Key("a")])
+        .unwrap();
+    ed.add_leading_comment(&[Segment::Key("list")], "the list")
+        .unwrap();
+    ed.delete(&[Segment::Key("server"), Segment::Key("tags")])
+        .unwrap();
+    assert_eq!(ed.source().unwrap(), zon_recorded("edited.expected"));
+}

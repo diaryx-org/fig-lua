@@ -25,7 +25,7 @@ lua-dotenv: registered (read edit serialize); every sample parsed, printed and r
 secrets.env: same table as `dotenv` (13 rows)
 ```
 
-Seven scripts ship in `languages/`, each the twin of a format fig compiles
+Nine scripts ship in `languages/`, each the twin of a format fig compiles
 in and held to it row for row:
 
 - `json.lua` — strict JSON, RFC 8259: the values, the escapes with
@@ -48,8 +48,18 @@ in and held to it row for row:
   it carries the regions and mentions the editor moves a table by, and
   the compiled printer's layout rules, width budget and all; held to
   the whole of toml-test, and its edits to the compiled format's bytes.
+- `zon.lua` — Zig Object Notation, `.zon`: `.{ .field = value }` structs,
+  `.{ 1, 2 }` arrays, Zig's numbers, strings and `\\` multiline strings,
+  `.enum` and `'c'` literals kept as extended scalars, `//` comments
+  recovered from the gaps between nodes as the compiled walk recovers
+  them. The compiled parser is Zig's own `std.zig.Ast`, so this carries
+  as much of Zig's tokenizer and expression grammar as decides what ZON
+  is, and refuses the rest as the compiled one does.
 - `dotenv.lua` — `.env` files: bash-identifier keys, an optional `export`,
   quoted and unquoted values, `#` comments, flat.
+- `properties.lua` — Java `.properties`: `=`, `:` or a space between key
+  and value, backslash escapes on both, `\uXXXX`, line continuations,
+  `#` and `!` comments, flat.
 - `plist.lua` — Apple property lists, the XML form: `dict`, `array`, typed
   scalars, `date` and `data`; and the two fragment renderers that spell an
   edited value as a typed element and an entry as `<key>` over it.

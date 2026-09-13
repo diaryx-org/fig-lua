@@ -100,8 +100,9 @@ pub mod script {
     //! as the wire's are; `fig.scanner` speaks them, so a script converts
     //! Lua's 1-based `i` with `i - 1` only below it. `languages/json.lua`,
     //! `languages/toml.lua`, `languages/ini.lua`, `languages/fig.lua`,
-    //! `languages/dotenv.lua`, `languages/plist.lua` and
-    //! `languages/canonical.lua` in this repository are complete scripts; the `fig` global is
+    //! `languages/zon.lua`, `languages/dotenv.lua`, `languages/properties.lua`,
+    //! `languages/plist.lua` and `languages/canonical.lua` in this repository
+    //! are complete scripts; the `fig` global is
     //! `src/prelude.lua`, and `src/grammar.lua` and `src/xml.lua` are the
     //! modules.
 }
