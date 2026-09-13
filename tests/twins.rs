@@ -524,6 +524,140 @@ fn toml_edits_as_the_compiled_format_does() {
     assert!(out.contains("# the name\ntitle"), "{out}");
 }
 
+/// One registration per process: a name can be registered once.
+fn lua_ini() -> Format {
+    static FORMAT: OnceLock<Format> = OnceLock::new();
+    *FORMAT.get_or_init(|| fig::language::register(script("ini.lua")).expect("registers")[0])
+}
+
+#[test]
+fn ini_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("ini.lua");
+    for (name, source, want) in fixtures("ini", "ini") {
+        let table = lang
+            .parse("lua-ini", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+            fig::helper::encode(&canonical(&got)),
+            fig::helper::encode(&canonical(&want)),
+        );
+    }
+}
+
+#[test]
+fn ini_registers_and_is_the_compiled_format_at_every_entry_point() {
+    let mine_fmt = lua_ini();
+    assert!(matches!(mine_fmt, Format::Runtime(_)));
+    assert_eq!(Format::by_name("lua-ini"), Some(mine_fmt));
+
+    for (name, source, _) in fixtures("ini", "ini") {
+        let mine = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let theirs = Document::parse(&source, Format::Ini).unwrap();
+        // The same tree, comments included: both print the same through
+        // the compiled printer and through the script's, and the script's
+        // printer is the compiled one's, byte for byte.
+        assert_eq!(
+            mine.serialize(Format::Ini).unwrap(),
+            theirs.serialize(Format::Ini).unwrap(),
+            "{name}: trees differ"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(mine_fmt).unwrap(),
+            "{name}: the script prints the two trees differently"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(Format::Ini).unwrap(),
+            "{name}: the script's printer differs from the compiled one"
+        );
+        assert_eq!(mine.to_value().unwrap(), theirs.to_value().unwrap());
+    }
+}
+
+#[test]
+fn ini_refuses_what_the_compiled_format_refuses_with_its_words_and_offset() {
+    // The compiled parser's messages, at the offsets the `fig` CLI reports
+    // for them (`fig get bad.ini -i ini`).
+    let mine = lua_ini();
+    const EMPTY: &str = "a key/section name cannot be empty";
+    const NO_EQUALS: &str = "expected `=` after this key; every INI line is `key = value`";
+    for (bad, message, offset) in [
+        (
+            &b"a = 1\n[a]\n"[..],
+            "this section conflicts with a key of the same name already defined at this level",
+            7,
+        ),
+        (
+            b"[open\n",
+            "unclosed `[section]` header; expected a `]` before the end of the line",
+            5,
+        ),
+        (b"nokey\n", NO_EQUALS, 5),
+        (b"k = v\n]\n", NO_EQUALS, 7),
+        (
+            b"[s] x\n",
+            "unexpected content after `]`; a section header must be alone on its line",
+            4,
+        ),
+        // `[ ]`: the compiled tokenizer used to hand the parser an inverted
+        // span for a whitespace-only name, and `fig fmt` crashed on it.
+        (b"[ ]\n", EMPTY, 2),
+        (b"= 1\n", EMPTY, 0),
+        (
+            b"a=1\r\rb=2\n",
+            "a bare `\\r` must be followed by `\\n`; line endings must be `\\n` or `\\r\\n`",
+            3,
+        ),
+    ] {
+        assert!(
+            Document::parse(bad, Format::Ini).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                // Offset 0 is "unknown" at the C ABI, so it comes back as
+                // `None`: the one offset the binding cannot carry.
+                let want = if offset == 0 { None } else { Some(offset) };
+                assert_eq!(e.byte_offset, want, "{}", String::from_utf8_lossy(bad));
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn ini_edits_as_the_compiled_format_does() {
+    // A section format's editing surface, INI-sized: values in and out of
+    // a section, a key that lands in a section, a whole section deleted —
+    // a reopened one, gathered from its regions — and a comment placed.
+    let mine_fmt = lua_ini();
+    let src = b"; top\nroot = 1\n\n[server]\nhost = h\n\n[other]\nk = v\n\n[server]\nport = 80\n";
+    let mut mine = Editor::open(src, mine_fmt).unwrap();
+    let mut theirs = Editor::open(src, Format::Ini).unwrap();
+    for ed in [&mut mine, &mut theirs] {
+        ed.replace_value(&[Segment::Key("server"), Segment::Key("host")], "localhost")
+            .unwrap();
+        ed.insert_value(&[Segment::Key("other")], "new", "yes")
+            .unwrap();
+        ed.set_value(&[Segment::Key("root")], 2i64).unwrap();
+        ed.add_leading_comment(&[Segment::Key("other"), Segment::Key("k")], "the k")
+            .unwrap();
+        ed.delete_container(&[Segment::Key("server")]).unwrap();
+    }
+    assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
+    let out = mine.source().unwrap();
+    assert!(!out.contains("server"), "{out}");
+    assert!(out.contains("; the k\nk = v"), "{out}");
+    assert!(out.contains("new = yes"), "{out}");
+}
+
 #[test]
 fn plist_parses_every_fixture_to_the_compiled_table() {
     let lang = script("plist.lua");
