@@ -274,12 +274,62 @@ local function quote(s)
   end) .. '"'
 end
 
+-- Whether strict JSON reads `raw` back as the same number: a plain
+-- decimal — no radix, no `_`, no `+`, no bare dot, no leading zero.
+local function json_spellable(raw)
+  local body = raw:sub(1, 1) == "-" and raw:sub(2) or raw
+  if body == "" or raw:sub(1, 1) == "+" or body:find("_", 1, true) then return false end
+  if body:match("^0[xXoObB]") then return false end
+  if body:sub(1, 1) == "." or body:sub(-1) == "." then return false end
+  local int_end = (body:find("[%.eE]") or (#body + 1)) - 1
+  if int_end > 1 and body:sub(1, 1) == "0" then return false end
+  return true
+end
+
+-- `raw` as a decimal lexeme, as the compiled printer canonicalizes a
+-- number another format spelled: radix converted, `_` and `+` dropped,
+-- bare dots padded, leading zeros stripped.
+local function canonical_number(raw)
+  local out = {}
+  local s = raw
+  if s:sub(1, 1) == "-" then
+    out[#out + 1] = "-"
+    s = s:sub(2)
+  elseif s:sub(1, 1) == "+" then
+    s = s:sub(2)
+  end
+  local radix = s:match("^0([xXoObB])")
+  if radix then
+    local digits = s:sub(3):gsub("_", "")
+    local v = tonumber(digits, ({ x = 16, o = 8, b = 2 })[radix:lower()])
+    out[#out + 1] = (v and digits ~= "" and math.type(v) == "integer") and tostring(v) or s
+    return table.concat(out)
+  end
+  local e_idx = s:find("[eE]")
+  local mantissa = e_idx and s:sub(1, e_idx - 1) or s
+  local exponent = e_idx and s:sub(e_idx) or ""
+  local dot = mantissa:find(".", 1, true)
+  local int_digits = (dot and mantissa:sub(1, dot - 1) or mantissa):gsub("_", ""):gsub("^0+", "")
+  out[#out + 1] = int_digits == "" and "0" or int_digits
+  if dot then
+    local frac = mantissa:sub(dot + 1):gsub("_", "")
+    out[#out + 1] = "." .. (frac == "" and "0" or frac)
+  end
+  out[#out + 1] = (exponent:gsub("_", ""))
+  return table.concat(out)
+end
+
 local function write_node(w, row, depth)
   local k = row.kind
   if k == "null" then
     w:put("null")
-  elseif k == "bool" or k == "int" or k == "float" then
+  elseif k == "bool" then
     w:put(row.text)
+  elseif k == "int" or k == "float" then
+    -- A number parsed here is its own lexeme; one from another format's
+    -- tree (`0xff`, `1_000`) is written as JSON reads it.
+    local raw = row.text or ""
+    w:put(json_spellable(raw) and raw or canonical_number(raw))
   elseif k == "string" then
     w:put(quote(row.text or ""))
   elseif k == "sequence" or k == "mapping" then
