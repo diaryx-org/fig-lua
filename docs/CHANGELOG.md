@@ -45,6 +45,7 @@ elsewhere:
 - a value renderer is told fig's `literal`; plist.lua stops classifying ([`a7d66d0`](https://github.com/diaryx-org/fig-lua/commit/a7d66d0a4d9c0011e0e2363d9476d457dfb781af))
 - canonical.lua, the twin of fig's canonical form ([`15aa74c`](https://github.com/diaryx-org/fig-lua/commit/15aa74c61f332e14166e4bb735ec0e4edd05f3f6))
 - json.lua, the twin of fig's compiled json format ([`e5b7fdd`](https://github.com/diaryx-org/fig-lua/commit/e5b7fdd328f3c32970a1b131fbdf4b12eb21b193))
+- toml.lua, the twin of fig's compiled toml format ([`d9b1cbd`](https://github.com/diaryx-org/fig-lua/commit/d9b1cbde1f54cb289cb2fbc06856361b7c69820b))
 
 ### Fixed
 
