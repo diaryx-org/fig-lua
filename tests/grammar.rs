@@ -165,3 +165,60 @@ fn sections_take_the_waiting_comments_by_depth() {
         r#"[{"node":3,"slot":"dangling","style":"line","text":"shallow"},{"node":5,"slot":"leading","style":"line","text":"deep"}]"#
     );
 }
+
+/// A script that answers, for the one token it is given, what `fig.number`
+/// and `fig.datetime` make of it — so the two modules are held to what
+/// fig's own `src/util/number.zig` and `src/util/datetime.zig` say.
+const PROBE: &str = r##"
+local N = require("fig.number")
+local DT = require("fig.datetime")
+local M = { name = "probe", caps = { read = true }, dialects = { { name = "probe" } } }
+function M.parse(_dialect, input)
+  local raw = input:sub(3)
+  local out
+  if input:sub(1, 1) == "n" then
+    out = table.concat({ tostring(N.spellable(raw, N.JSON)), tostring(N.spellable(raw, N.JSON5)), tostring(N.spellable(raw, N.YAML_1_2)), N.canonical(raw) }, " ")
+  else
+    out = (DT.classify(raw) or "-") .. " " .. (DT.classify(raw, { minute_precision = false, time_only = false }) or "-")
+  end
+  return fig.scalar("string", { 0, #input }, out)
+end
+return M
+"##;
+
+#[test]
+fn number_and_datetime_answer_as_the_compiled_utilities_do() {
+    let lang = LuaLanguage::from_source("probe.lua", PROBE).unwrap();
+    for (raw, want) in [
+        // `n:` — spellable for JSON, JSON5, YAML 1.2, then canonical;
+        // `d:` — classify lenient, then with seconds required and no bare time.
+        ("n:0xff", "false true true 255"),
+        ("n:-0x1F", "false true true -31"),
+        ("n:0b1010", "false false false 10"),
+        ("n:0o17", "false false true 15"),
+        ("n:1_000", "false false false 1000"),
+        ("n:.5", "false true true 0.5"),
+        ("n:5.", "false true true 5.0"),
+        ("n:0755", "false false true 755"),
+        ("n:+7", "false true true 7"),
+        ("n:1e5", "true true true 1e5"),
+        ("n:-12.5", "true true true -12.5"),
+        ("d:2024-02-29", "local_date local_date"),
+        ("d:2023-02-29", "- -"),
+        ("d:12:30", "local_time -"),
+        ("d:12:30:00", "local_time -"),
+        ("d:2024-01-02T12:30:00Z", "offset_datetime offset_datetime"),
+        ("d:2024-01-02 12:30+01:00", "offset_datetime -"),
+        ("d:2024-01-02t12:30:60.5", "local_datetime local_datetime"),
+        ("d:2024-01-02T25:00:00", "- -"),
+    ] {
+        let table = lang.parse("probe", raw.as_bytes()).unwrap();
+        let v = fig::helper::table_to_value(&table);
+        let rows = v.get("rows").and_then(Value::as_seq).unwrap();
+        assert_eq!(
+            rows[0].get("text").and_then(Value::as_str),
+            Some(want),
+            "{raw}"
+        );
+    }
+}
