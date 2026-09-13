@@ -44,6 +44,7 @@ elsewhere:
 - fig.grammar, a format as a description, with the twins rewritten against it ([`14f4041`](https://github.com/diaryx-org/fig-lua/commit/14f40419ecd6c9f8098efb7ef9578140d3abf48a))
 - a value renderer is told fig's `literal`; plist.lua stops classifying ([`a7d66d0`](https://github.com/diaryx-org/fig-lua/commit/a7d66d0a4d9c0011e0e2363d9476d457dfb781af))
 - canonical.lua, the twin of fig's canonical form ([`15aa74c`](https://github.com/diaryx-org/fig-lua/commit/15aa74c61f332e14166e4bb735ec0e4edd05f3f6))
+- json.lua, the twin of fig's compiled json format ([`e5b7fdd`](https://github.com/diaryx-org/fig-lua/commit/e5b7fdd328f3c32970a1b131fbdf4b12eb21b193))
 
 ### Fixed
 
