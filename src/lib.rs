@@ -50,7 +50,7 @@ pub mod script {
     //! ```lua
     //! local M = {}
     //! M.name = "lua-dotenv"
-    //! M.caps = { read = true, edit = true, serialize = true }
+    //! M.caps = { read = true, edit = true, serialize = true }  -- and `references` for a format with anchors, aliases and tags
     //! M.max_mapping_depth = 0
     //! M.syntax = { comments = "hash", kv_sep = "=", empty_map_literal = "{}" }
     //! M.dialects = { { name = "lua-dotenv", extensions = { "env" }, splice = "raw", empty_doc_seed = "" } }
@@ -70,8 +70,10 @@ pub mod script {
     //! a **node table** built with `fig.table()` and `t:row(...)`, or any
     //! table of the same shape: `rows` in pre-order, each
     //! `{kind=, parent=, span={s,e}, text=, ...}` with `parent` a 0-based
-    //! row id or nil for the root; `comments`, `regions`, `mentions`. To
-    //! refuse the input it calls `fig.fail(message, byte_offset)`, from
+    //! row id or nil for the root; `comments`, `regions`, `mentions`, and
+    //! `directives` for a format with tag-handle declarations (YAML's
+    //! `%TAG`; `t:directive(handle, prefix)`). To refuse the input it
+    //! calls `fig.fail(message, byte_offset)`, from
     //! anywhere; any other error it raises is reported without an offset.
     //! Most scripts write neither by hand: `require("fig.grammar")` is a
     //! set of rules whose results are these nodes, and `G.document{...}`

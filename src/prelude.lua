@@ -68,7 +68,7 @@ Table.__index = Table
 --- A new, empty node table. Rows are added in pre-order: a container
 --- before its children, a keyvalue before its key and then its value.
 function fig.table()
-  return setmetatable({ rows = {}, comments = {}, regions = {}, mentions = {} }, Table)
+  return setmetatable({ rows = {}, comments = {}, regions = {}, mentions = {}, directives = {} }, Table)
 end
 
 --- Add one row and return its id. `kind` is one of "null", "bool", "int",
@@ -104,6 +104,14 @@ function Table:mention(node, span, kind)
   self.mentions[#self.mentions + 1] = { node = node, span = span, kind = kind }
 end
 
+--- Record one tag-handle declaration of the document (a YAML `%TAG`):
+--- `handle` is `!e!`, or a redefined `!`/`!!`, and `prefix` what it
+--- expands to. A print of a whole document receives them back, in this
+--- order, to re-emit above any tag that uses one.
+function Table:directive(handle, prefix)
+  self.directives[#self.directives + 1] = { handle = handle, prefix = prefix }
+end
+
 --- Whether `kind` names a scalar row.
 function fig.is_scalar(kind)
   return kind ~= "sequence" and kind ~= "mapping" and kind ~= "keyvalue" and kind ~= "alias"
@@ -120,6 +128,7 @@ function fig.index(t)
   t.comments = t.comments or {}
   t.regions = t.regions or {}
   t.mentions = t.mentions or {}
+  t.directives = t.directives or {}
   for i, row in ipairs(t.rows) do
     row.id = i - 1
     row.children = {}
