@@ -62,6 +62,17 @@ in and held to it row for row:
   them. The compiled parser is Zig's own `std.zig.Ast`, so this carries
   as much of Zig's tokenizer and expression grammar as decides what ZON
   is, and refuses the rest as the compiled one does.
+- `yaml.lua` — YAML 1.2, whole, and 1.1's scalar resolution as a second
+  dialect (`lua-yaml-1.1`): block and flow collections, every scalar
+  style — plain, quoted with their escapes and folds, `|` and `>` blocks
+  with their indicators — anchors, aliases and `<<` merges, tags kept
+  verbatim with their `%TAG` handles, explicit `?` keys, directives and
+  document markers, comments bound as the compiled parser binds them; and
+  the compiled printer's block style with its flow form where a
+  collection fits the width. The largest twin, and the one that carries
+  a reference layer (`caps.references`), so a document leaving it for
+  JSON is collapsed as one leaving the compiled YAML is; held to the
+  whole yaml-test-suite and to the compiled editor's cases.
 - `dotenv.lua` — `.env` files: bash-identifier keys, an optional `export`,
   quoted and unquoted values, `#` comments, flat.
 - `properties.lua` — Java `.properties`: `=`, `:` or a space between key

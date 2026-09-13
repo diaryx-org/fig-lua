@@ -1783,3 +1783,521 @@ fn nestedtext_renders_as_the_compiled_editor_helper_does() {
     );
     assert!(render(Renderer::Key, "", "- tag", "", "plain").is_err());
 }
+
+// ── yaml ───────────────────────────────────────────────────────────────────
+
+/// One registration per process: a name can be registered once. The
+/// language serves two dialects, `lua-yaml` first (its own name) and
+/// `lua-yaml-1.1`, whose plain scalars resolve by the 1.1 tag repository;
+/// `register` answers one `Format` per dialect, in order.
+fn lua_yaml_dialects() -> &'static [Format] {
+    static FORMATS: OnceLock<Vec<Format>> = OnceLock::new();
+    FORMATS.get_or_init(|| fig::language::register(script("yaml.lua")).expect("registers"))
+}
+
+#[test]
+fn yaml_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("yaml.lua");
+    for (dir, dialect) in [("yaml", "lua-yaml"), ("yaml-1.1", "lua-yaml-1.1")] {
+        for (name, source, want) in fixtures(dir, "yaml") {
+            let table = lang
+                .parse(dialect, &source)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+            let got = fig::helper::table_to_value(&table);
+            assert_eq!(
+                canonical(&got),
+                canonical(&want),
+                "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+                fig::helper::encode(&canonical(&got)),
+                fig::helper::encode(&canonical(&want)),
+            );
+        }
+    }
+}
+
+#[test]
+fn yaml_registers_and_is_the_compiled_format_at_every_entry_point() {
+    let dialects = lua_yaml_dialects();
+    let mine_fmt = dialects[0];
+    assert!(matches!(mine_fmt, Format::Runtime(_)));
+    assert_eq!(Format::by_name("lua-yaml"), Some(mine_fmt));
+    assert_eq!(Format::by_name("lua-yaml-1.1"), Some(dialects[1]));
+    // A reference layer is declared, as the compiled YAML's is.
+    assert!(fig::capabilities(mine_fmt).references);
+    assert!(fig::capabilities(Format::Yaml).references);
+
+    for (name, source, _) in fixtures("yaml", "yaml") {
+        let mine = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let theirs = Document::parse(&source, Format::Yaml).unwrap();
+        assert_eq!(
+            mine.serialize(Format::Yaml).unwrap(),
+            theirs.serialize(Format::Yaml).unwrap(),
+            "{name}: trees differ"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(mine_fmt).unwrap(),
+            "{name}: the script prints the two trees differently"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(Format::Yaml).unwrap(),
+            "{name}: the script's printer differs from the compiled one"
+        );
+        // Leaving for a format without the layer collapses it — aliases
+        // to copies, merges flattened, tags applied — for the twin as for
+        // the compiled format, because both declare it.
+        assert_eq!(
+            mine.serialize(Format::Json).map_err(|e| e.to_string()),
+            theirs.serialize(Format::Json).map_err(|e| e.to_string()),
+            "{name}: materialized differently"
+        );
+        // `to_value` walks the reference layer as the compiled document's
+        // is walked: an alias or a tagged node has no value, which is the
+        // same refusal from both.
+        // (Compared as text: a `.nan` is a NaN, which is never equal to
+        // itself.)
+        assert_eq!(
+            format!("{:?}", mine.to_value()),
+            format!("{:?}", theirs.to_value()),
+            "{name}: values differ"
+        );
+    }
+
+    // The 1.1 dialect resolves as the compiled `--spec 1.1` does (its
+    // fixtures' tables were recorded with it); the binding selects no
+    // version, so here it is the resolution that shows: `yes` a bool,
+    // `0777` an int, `1e3` a string.
+    let one_one = Document::parse(b"a: yes\nb: 0777\nc: 1e3\n", dialects[1]).unwrap();
+    assert_eq!(
+        one_one.serialize(Format::Json).unwrap(),
+        "{\n  \"a\": true,\n  \"b\": 777,\n  \"c\": \"1e3\"\n}\n"
+    );
+}
+
+#[test]
+fn yaml_refuses_what_the_compiled_format_refuses_in_its_words() {
+    // The compiled parser's refusals are error names with no position, as
+    // `fig get bad.yaml -i yaml` reports them.
+    let mine = lua_yaml_dialects()[0];
+    for (bad, message) in [
+        (&b"a: b: c"[..], "UnexpectedToken"),
+        (b"a:\n\t- b\n", "TabIndent"),
+        (b"a:\n  b: 1\n c: 2\n", "InvalidIndent"),
+        (b"&a &b x\n", "DuplicateProperty"),
+        (b"x: *nope\n", "UndefinedAlias"),
+        (b"\"abc\n", "UnclosedString"),
+        (b"!e!x a\n", "UndefinedTagHandle"),
+        (b"a: \"\\q\"\n", "UnexpectedToken"),
+        (b"a: \"\\uD800\"\n", "InvalidUnicodeEscape"),
+        (b"a: \"\\u12\"\n", "UnclosedString"),
+        (b"a: 1\n---\nb: 2\n", "MultipleDocuments"),
+        (b"%YAML 1.2\n", "InvalidDirective"),
+        (b"%YAML 1.2\n%YAML 1.2\n---\n", "InvalidDirective"),
+        (b"a: |0\n  x\n", "InvalidBlockHeader"),
+        (b"a: !<>\n", "InvalidTag"),
+        (b"a: !!str,x\n", "InvalidTag"),
+        (b"a: & x\n", "InvalidAnchor"),
+        (b"a: *\n", "InvalidAlias"),
+        (b"- a\n- b\nk: v\n", "UnexpectedToken"),
+        (b"--- a: b\n", "UnexpectedToken"),
+        (b"{a: b}x\n", "UnexpectedToken"),
+        (b"[a, b\n", "UnexpectedToken"),
+        (b"a: [b, - c]\n", "UnexpectedToken"),
+        (b"key: - one\n", "UnexpectedToken"),
+        (b"a: 'x\n", "UnclosedString"),
+        (b"a: |\n\tx\n", "UnexpectedToken"),
+        (b"k:\n  v\n  more: x\n", "UnexpectedToken"),
+        (b"&b *a\n", "UnexpectedToken"),
+    ] {
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                assert_eq!(e.byte_offset, None, "{}", String::from_utf8_lossy(bad));
+            }
+            other => panic!(
+                "{}: expected a parse error, got {other:?}",
+                String::from_utf8_lossy(bad)
+            ),
+        }
+        assert!(
+            Document::parse(bad, Format::Yaml).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+    }
+}
+
+#[test]
+fn yaml_edits_as_the_compiled_format_does() {
+    // The engine YAML was written against, through the twin's table: the
+    // cases of fig's `editor_helper.zig` — an edit through an alias that
+    // severs only that alias, a merge-only key materialized locally and
+    // refused for deletion, keys inserted block and flow, deletions that
+    // carry comments, sequence appends in every style, block-over-inline
+    // reframes, keys and items moved and reordered, a sequence set — each
+    // through the script and through the compiled format, to the same
+    // bytes or the same refusal.
+    let mine_fmt = lua_yaml_dialects()[0];
+    let k = Segment::Key;
+    let i = Segment::Index;
+    type Edit = Box<dyn Fn(&mut Editor) -> Result<(), String>>;
+    let cases: Vec<(&[u8], Edit)> = vec![
+        (
+            b"a: &x 1\nb: *x\n",
+            Box::new(move |ed| ed.replace_value(&[k("b")], 5i64).map_err(|e| e.to_string())),
+        ),
+        (
+            b"base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2\n",
+            Box::new(move |ed| {
+                ed.replace_value(&[k("d"), k("x")], 5i64)
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2\n",
+            Box::new(move |ed| ed.delete(&[k("d"), k("x")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\nb: 2\n",
+            Box::new(move |ed| ed.insert_value(&[], "c", 3i64).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\nb: 2",
+            Box::new(move |ed| ed.insert_value(&[], "c", 3i64).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a:\n  b: 1\n",
+            Box::new(move |ed| {
+                ed.insert_value(&[k("a")], "c", 3i64)
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: {}\n",
+            Box::new(move |ed| {
+                ed.insert_value(&[k("a")], "c", 3i64)
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: {b: 1}\n",
+            Box::new(move |ed| {
+                ed.insert_value(&[k("a")], "c", "x")
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a:\n",
+            Box::new(move |ed| {
+                ed.insert_value(&[k("a")], "c", 3i64)
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: 1\n",
+            Box::new(move |ed| {
+                ed.insert_value(&[], "m", Value::Map(vec![("x".into(), 1i64.into())]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: 1\n",
+            Box::new(move |ed| {
+                ed.insert_value(&[], "s", Value::Seq(vec![1i64.into(), 2i64.into()]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: {b: 1}\n",
+            Box::new(move |ed| {
+                ed.insert_value(&[k("a")], "s", Value::Seq(vec![1i64.into()]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: [1]\n",
+            Box::new(move |ed| {
+                ed.append_value(&[k("a")], Value::Map(vec![("x".into(), 1i64.into())]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: 1\nb: 2\nc: 3\n",
+            Box::new(move |ed| ed.delete(&[k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\n# owned\nb: 2\nc: 3\n",
+            Box::new(move |ed| ed.delete(&[k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\n\n# kept\nb: 2\n",
+            Box::new(move |ed| ed.delete(&[k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\nb: 2 # trail\n",
+            Box::new(move |ed| ed.delete(&[k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\n",
+            Box::new(move |ed| ed.delete(&[k("a")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"{a: 1, b: 2, c: 3}\n",
+            Box::new(move |ed| ed.delete(&[k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"{a: 1, b: 2}\n",
+            Box::new(move |ed| ed.delete(&[k("a")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"{a: 1}\n",
+            Box::new(move |ed| ed.delete(&[k("a")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"m: {\n  a: 1,\n  b: 2,\n}\n",
+            Box::new(move |ed| ed.delete(&[k("m"), k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: |\n  x\n  y\nb: 1\n",
+            Box::new(move |ed| ed.delete(&[k("a")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s:\n  - a\n  - b\n",
+            Box::new(move |ed| ed.append_value(&[k("s")], "c").map_err(|e| e.to_string())),
+        ),
+        (
+            b"s:\n- a\n- b\n",
+            Box::new(move |ed| ed.append_value(&[k("s")], "c").map_err(|e| e.to_string())),
+        ),
+        (
+            b"s:\n  - a\n",
+            Box::new(move |ed| ed.prepend_value(&[k("s")], "z").map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: [a, b]\n",
+            Box::new(move |ed| ed.append_value(&[k("s")], "c").map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: []\n",
+            Box::new(move |ed| ed.append_value(&[k("s")], "c").map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: [a, b,]\n",
+            Box::new(move |ed| ed.append_value(&[k("s")], "c").map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: [\n  a,\n  b,\n]\n",
+            Box::new(move |ed| ed.append_value(&[k("s")], "c").map_err(|e| e.to_string())),
+        ),
+        (
+            b"s:\n  - a\n  - b\n  - c\n",
+            Box::new(move |ed| ed.remove_item(&[k("s")], 1).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: [a, b, c]\n",
+            Box::new(move |ed| ed.remove_item(&[k("s")], 1).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: [a, b, c]\n",
+            Box::new(move |ed| ed.remove_item(&[k("s")], 0).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: [\n  a,\n  b,\n]\n",
+            Box::new(move |ed| ed.remove_item(&[k("s")], 1).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: []\n",
+            Box::new(move |ed| {
+                ed.replace_value(&[k("s")], Value::Seq(vec![1i64.into(), 2i64.into()]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s:\n  - 1\n  - 2\n",
+            Box::new(move |ed| {
+                ed.replace_value(&[k("s")], Value::Seq(vec![]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s: x\n",
+            Box::new(move |ed| {
+                ed.replace_value(&[k("s")], Value::Seq(vec![1i64.into()]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s:\n",
+            Box::new(move |ed| {
+                ed.replace_value(&[k("s")], Value::Seq(vec![1i64.into()]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s: x\n",
+            Box::new(move |ed| {
+                ed.replace_value(&[k("s")], Value::Map(vec![("a".into(), 1i64.into())]))
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s: x # c\n",
+            Box::new(move |ed| ed.replace_value(&[k("s")], "y").map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: {a: 1}\n",
+            Box::new(move |ed| {
+                ed.replace_value(
+                    &[k("s")],
+                    Value::Map(vec![("a".into(), 1i64.into()), ("b".into(), 2i64.into())]),
+                )
+                .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: 1\nb: 2\nc: 3\n",
+            Box::new(move |ed| ed.move_key(&[k("a")], &[k("c")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\nb: 2\nc: 3\n",
+            Box::new(move |ed| ed.move_key(&[k("c")], &[k("a")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"# c\na: 1\nb: 2\n",
+            Box::new(move |ed| ed.move_key(&[k("a")], &[k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1 # t\nb: 2\n",
+            Box::new(move |ed| ed.move_key(&[k("a")], &[k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: |\n  x\nb: 2\n",
+            Box::new(move |ed| ed.move_key(&[k("a")], &[k("b")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\nb: 2\nc: 3\n",
+            Box::new(move |ed| {
+                ed.reorder_keys(&[], &["c", "a", "b"])
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: 1\nb: 2\nc: 3\n",
+            Box::new(move |ed| ed.reorder_keys(&[], &["c"]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"# a\na: 1\n\nb: 2\nc: 3\n",
+            Box::new(move |ed| ed.reorder_keys(&[], &["b", "a"]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"m:\n  a: 1\n  b: 2\n",
+            Box::new(move |ed| {
+                ed.reorder_keys(&[k("m")], &["b", "a"])
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s:\n  - a\n  - b\n  - c\n",
+            Box::new(move |ed| ed.move_item(&[k("s")], 0, 2).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s:\n  - a\n  - b\n  - c\n",
+            Box::new(move |ed| ed.move_item(&[k("s")], 2, 0).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s:\n  # a\n  - a\n  - b\n",
+            Box::new(move |ed| ed.move_item(&[k("s")], 0, 1).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s: [a, b, c]\n",
+            Box::new(move |ed| ed.move_item(&[k("s")], 0, 2).map_err(|e| e.to_string())),
+        ),
+        (
+            b"s:\n  - a\n  - b\n  - c\n",
+            Box::new(move |ed| {
+                ed.reorder_items(&[k("s")], &[2, 0])
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s: [a, b, c]\n",
+            Box::new(move |ed| {
+                ed.reorder_items(&[k("s")], &[2, 1, 0])
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s: [a,b,c]\n",
+            Box::new(move |ed| {
+                ed.reorder_items(&[k("s")], &[1, 0])
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s:\n  # x\n  - x\n  - y\n  - z\n",
+            Box::new(move |ed| {
+                ed.set_sequence(&[k("s")], &["z".into(), "x".into(), "w".into()])
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"s:\n  - x\n  - y\n",
+            Box::new(move |ed| ed.set_sequence(&[k("s")], &[]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\n",
+            Box::new(move |ed| {
+                ed.add_leading_comment(&[k("a")], "note")
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: 1\n",
+            Box::new(move |ed| {
+                ed.set_trailing_comment(&[k("a")], "note")
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a:\n  - x\n",
+            Box::new(move |ed| {
+                ed.add_leading_comment(&[k("a"), i(0)], "item")
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: 1\n",
+            Box::new(move |ed| {
+                ed.add_dangling_comment(&[], "end")
+                    .map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            b"a: 1\nb: 2\n",
+            Box::new(move |ed| ed.comment_out(&[k("a")]).map_err(|e| e.to_string())),
+        ),
+        (
+            b"a: 1\nb: 2\n",
+            Box::new(move |ed| ed.replace_key(&[k("a")], "z").map_err(|e| e.to_string())),
+        ),
+    ];
+    for (n, (src, edit)) in cases.iter().enumerate() {
+        let mut mine = Editor::open(src, mine_fmt).unwrap();
+        let mut theirs = Editor::open(src, Format::Yaml).unwrap();
+        let a = edit(&mut mine);
+        let b = edit(&mut theirs);
+        assert_eq!(
+            a,
+            b,
+            "case {n} ({}): outcomes differ",
+            String::from_utf8_lossy(src)
+        );
+        assert_eq!(
+            mine.source().unwrap(),
+            theirs.source().unwrap(),
+            "case {n} ({}): sources differ",
+            String::from_utf8_lossy(src)
+        );
+    }
+}
