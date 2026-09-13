@@ -1,17 +1,22 @@
--- YAML, in Lua: the twin of fig's compiled `yaml` format, row for row,
--- marker for marker, anchor for anchor.
+-- YAML, in Lua: the twin of fig's compiled `yaml` format — YAML 1.2
+-- with the 1.1 tag repository as a second dialect.
 --
--- `fig lang check lua-yaml --against yaml <files…>` holds this script to
--- the compiled parser's node table on every file given, and this script
--- is written against `fig lang table -i yaml`, which prints that table.
--- What the compiled format accepts is stated in fig's
--- `src/languages/yaml/` (`tokenizer.zig`, `parser.zig`, `printer.zig`,
--- `editor_helper.zig`), and this follows them function for function —
--- the tokenizer's line-by-line indentation structure, the parser's
--- container stack and its comment layer, the printer's block style with
--- a flow form where a collection fits the width.
+-- The contract is the format and the table, not the compiled parser's
+-- code: `fig lang table -i yaml` prints the node table a document makes,
+-- and this script is held to it row for row — kinds, text, spans,
+-- anchors, tags, markers, separators, comments with their slot and
+-- style, and the `%TAG` directives. `fig lang check lua-yaml --against
+-- yaml <files…>` is that check on any file. The printer is held to the
+-- compiled printer's bytes: block style, a flow form where a collection
+-- fits the width.
 --
--- The shape, as the compiled parser builds it:
+-- What the format is — the indentation structure, the flow collections,
+-- the block scalars with their indicators, anchors, tags, directives —
+-- is stated here in full, because that is the format. What is not the
+-- format is not: this refuses every document the compiled format
+-- refuses, but in its own words and at its own offsets.
+--
+-- The shape of the table:
 --
 --   * a block mapping spans its first key through its last value; a
 --     block sequence its first `-` (recorded as each item's `marker`)
@@ -36,12 +41,7 @@
 --     be used by a tag; a `%YAML` directive is checked and dropped; a
 --     second document is refused.
 --
--- The refusals are the compiled parser's, by name and — as the compiled
--- parser reports none — without a position: `UnexpectedToken`,
--- `InvalidIndent`, `TabIndent`, `UnclosedString`, `MultipleDocuments`,
--- `DuplicateProperty`, `UndefinedAlias`, `InvalidDirective`,
--- `UndefinedTagHandle`, `InvalidTag`, `InvalidAnchor`, `InvalidAlias`,
--- `InvalidBlockHeader`, `InvalidUnicodeEscape`.
+
 
 local M = {}
 
@@ -71,6 +71,9 @@ M.samples = {
 }
 M.renderers = {}
 
+local DT = require("fig.datetime")
+local N = require("fig.number")
+
 local byte, sub, find, concat = string.byte, string.sub, string.find, table.concat
 
 -- The byte at 0-based offset `i` of `s`, or nil past its end.
@@ -83,15 +86,12 @@ local SQ, DQ, PIPE, GT, BANG, AMP, STAR, PCT, DOT = 39, 34, 124, 62, 33, 38, 42,
 local BSLASH, LT = 92, 60
 
 local function is_blank(c) return c == SP or c == TAB end
-local function is_digit(c) return c ~= nil and c >= 48 and c <= 57 end
-local function is_hex(c) return c ~= nil and (is_digit(c) or (c >= 97 and c <= 102) or (c >= 65 and c <= 70)) end
-local function is_octal(c) return c ~= nil and c >= 48 and c <= 55 end
-local function is_binary(c) return c == 48 or c == 49 end
 
 -- ── the tokenizer ─────────────────────────────────────────────────────────
--- `tokenizer.zig`, line by line. Every token is `{kind=, s=, e=}` over
--- 0-based offsets; an `indent`/`dedent`/`newline` is structural, the rest
--- is content, and `block_scalar` is the raw body of a block scalar.
+-- YAML is read a line at a time, because its structure is indentation.
+-- Every token is `{kind=, s=, e=}` over 0-based offsets; an
+-- `indent`/`dedent`/`newline` is structural, the rest is content, and
+-- `block_scalar` is the raw body of a block scalar.
 
 local T = {}
 T.__index = T
@@ -233,17 +233,23 @@ local function plain_continuation_start(c)
     or c == 64 or c == 96 or c == PCT)
 end
 
+-- The line at `pos`: where its content begins (past the leading
+-- spaces), where it ends (before its `\r\n` or `\n`), and where the next
+-- line begins.
+function T:line_at(pos)
+  local src = self.src
+  local nl = find(src, "\n", pos + 1, true)
+  local e = trim_cr(src, pos, nl and (nl - 1) or self.n)
+  local content_start = pos
+  while content_start < e and at(src, content_start) == SP do content_start = content_start + 1 end
+  return { start = pos, content_start = content_start, e = e, newline_end = nl or self.n }
+end
+
 function T:get_line()
   if self.i >= self.n then return nil end
-  local src = self.src
-  local start = self.i
-  local nl = find(src, "\n", start + 1, true)
-  local raw_end = nl and (nl - 1) or self.n
-  self.i = nl or self.n
-  local e = trim_cr(src, start, raw_end)
-  local content_start = start
-  while content_start < e and at(src, content_start) == SP do content_start = content_start + 1 end
-  return { start = start, content_start = content_start, e = e, newline_end = self.i }
+  local line = self:line_at(self.i)
+  self.i = line.newline_end
+  return line
 end
 
 function T:line_all_ws(line)
@@ -317,12 +323,11 @@ function T:tab_indented_structure(line)
   return se < line.e and at(src, se) == COLON
 end
 
+-- What is left of the line `pos` falls in, as a line of its own.
 function T:remainder_line(pos)
-  local src = self.src
-  local nl = find(src, "\n", pos + 1, true)
-  local nl0 = nl and (nl - 1) or self.n
-  local newline_end = nl and nl or self.n
-  return { start = pos, content_start = pos, e = trim_cr(src, pos, nl0), newline_end = newline_end }
+  local line = self:line_at(pos)
+  line.content_start = pos
+  return line
 end
 
 function T:column_of(pos)
@@ -439,13 +444,8 @@ function T:gather_plain_continuation(line, floor)
   local probe = line.newline_end
   local result = nil
   while probe < n do
-    local line_start = probe
-    local nl = find(src, "\n", line_start + 1, true)
-    local nl0 = nl and (nl - 1) or n
-    local newline_end = nl and nl or n
-    local e = trim_cr(src, line_start, nl0)
-    local spaces = line_start
-    while spaces < e and at(src, spaces) == SP do spaces = spaces + 1 end
+    local ln = self:line_at(probe)
+    local line_start, spaces, e, newline_end = ln.start, ln.content_start, ln.e, ln.newline_end
     local ws = line_start
     while ws < e and is_blank(at(src, ws)) do ws = ws + 1 end
     if ws == e then
@@ -458,17 +458,11 @@ function T:gather_plain_continuation(line, floor)
       local se = scalar_end(src, ws, e, false)
       if se ~= e then
         if at(src, se) == HASH then
-          result = {
-            content_end = trim_right_spaces(src, ws, se),
-            last_line = { start = line_start, content_start = spaces, e = e, newline_end = newline_end },
-          }
+          result = { content_end = trim_right_spaces(src, ws, se), last_line = ln }
         end
         break
       end
-      result = {
-        content_end = trim_right_spaces(src, ws, e),
-        last_line = { start = line_start, content_start = spaces, e = e, newline_end = newline_end },
-      }
+      result = { content_end = trim_right_spaces(src, ws, e), last_line = ln }
       probe = newline_end
     end
   end
@@ -521,14 +515,14 @@ function T:multiline_quoted_end(start, floor)
     local c = at(src, i)
     if c == NL then
       local line_start = i + 1
-      if self:doc_marker_at(line_start) then fig.fail("UnclosedString") end
+      if self:doc_marker_at(line_start) then fig.fail("this quoted string is never closed; a document marker line ends it", start) end
       local spaces = line_start
       while spaces < n and at(src, spaces) == SP do spaces = spaces + 1 end
       local ws = line_start
       while ws < n and is_blank(at(src, ws)) do ws = ws + 1 end
       local wc = at(src, ws)
       local blank = ws >= n or wc == NL or wc == CR
-      if not blank and floor ~= nil and spaces - line_start <= floor then fig.fail("InvalidIndent") end
+      if not blank and floor ~= nil and spaces - line_start <= floor then fig.fail("a quoted string continued on the next line must stay indented past its block", spaces) end
       i = i + 1
     elseif double then
       if c == BSLASH then
@@ -550,7 +544,7 @@ function T:multiline_quoted_end(start, floor)
       end
     end
   end
-  fig.fail("UnclosedString")
+  fig.fail("this quoted string is never closed", start)
 end
 
 function T:flush_pending_block()
@@ -569,13 +563,8 @@ function T:consume_block_body(info)
   local min_blank_tab = nil
   local last_end = body_start
   while self.i < n do
-    local line_start = self.i
-    local nl = find(src, "\n", line_start + 1, true)
-    local nl0 = nl and (nl - 1) or n
-    local newline_end = nl and nl or n
-    local e = trim_cr(src, line_start, nl0)
-    local spaces = line_start
-    while spaces < e and at(src, spaces) == SP do spaces = spaces + 1 end
+    local ln = self:line_at(self.i)
+    local line_start, spaces, e, newline_end = ln.start, ln.content_start, ln.e, ln.newline_end
     local ws = line_start
     while ws < e and is_blank(at(src, ws)) do ws = ws + 1 end
     local blank = ws == e
@@ -583,7 +572,7 @@ function T:consume_block_body(info)
     if blank then
       if content_indent == nil then
         if ws > spaces and (info.root or indent > info.header_indent) then
-          if max_leading_blank > indent then fig.fail("InvalidIndent") end
+          if max_leading_blank > indent then fig.fail("a blank line in this block scalar is indented past its first content line", line_start) end
           content_indent = indent
         else
           if ws > spaces then
@@ -599,15 +588,15 @@ function T:consume_block_body(info)
         if indent < content_indent then break end
       else
         if not info.root and indent <= info.header_indent then break end
-        if max_leading_blank > indent then fig.fail("InvalidIndent") end
-        if min_blank_tab ~= nil and min_blank_tab < indent then fig.fail("TabIndent") end
+        if max_leading_blank > indent then fig.fail("a blank line in this block scalar is indented past its first content line", line_start) end
+        if min_blank_tab ~= nil and min_blank_tab < indent then fig.fail("a tab indents this block scalar; YAML indentation is spaces", line_start) end
         content_indent = indent
       end
     end
     self.i = newline_end
     last_end = newline_end
   end
-  if content_indent == nil and min_blank_tab ~= nil then fig.fail("TabIndent") end
+  if content_indent == nil and min_blank_tab ~= nil then fig.fail("a tab indents this block scalar; YAML indentation is spaces", body_start) end
   if last_end > body_start then self:add("block_scalar", body_start, last_end) end
 end
 
@@ -619,6 +608,11 @@ function T:tokenize_line_content(line_in)
   local block_owner_indent = line.content_start - line.start
   local node_start = line.content_start
   local flow
+  -- Whatever is not an indicator here is the start of a plain scalar.
+  local function plain()
+    line, cursor = self:handle_plain(cursor, line)
+    at_content_start = false
+  end
 
   while cursor < line.e do
     local c = at(src, cursor)
@@ -634,8 +628,7 @@ function T:tokenize_line_content(line_in)
         self:add("comment", cursor, line.e)
         return
       end
-      line, cursor = self:handle_plain(cursor, line)
-      at_content_start = false
+      plain()
     elseif c == COLON then
       if colon_is_indicator(src, cursor, line.e, flow) or self:json_key_colon() then
         if not flow and node_start >= line.start then block_owner_indent = node_start - line.start end
@@ -643,28 +636,16 @@ function T:tokenize_line_content(line_in)
         cursor = cursor + 1
         at_content_start = true
       else
-        line, cursor = self:handle_plain(cursor, line)
-        at_content_start = false
+        plain()
       end
-    elseif c == LBRACK then
+    elseif c == LBRACK or c == LBRACE then
       if self.flow_depth == 0 then self:open_flow(line) end
-      self:add("flow_seq_start", cursor, cursor + 1)
+      self:add(c == LBRACK and "flow_seq_start" or "flow_map_start", cursor, cursor + 1)
       self.flow_depth = self.flow_depth + 1
       cursor = cursor + 1
       at_content_start = false
-    elseif c == LBRACE then
-      if self.flow_depth == 0 then self:open_flow(line) end
-      self:add("flow_map_start", cursor, cursor + 1)
-      self.flow_depth = self.flow_depth + 1
-      cursor = cursor + 1
-      at_content_start = false
-    elseif c == RBRACK then
-      self:add("flow_seq_end", cursor, cursor + 1)
-      if self.flow_depth > 0 then self.flow_depth = self.flow_depth - 1 end
-      cursor = cursor + 1
-      at_content_start = false
-    elseif c == RBRACE then
-      self:add("flow_map_end", cursor, cursor + 1)
+    elseif c == RBRACK or c == RBRACE then
+      self:add(c == RBRACK and "flow_seq_end" or "flow_map_end", cursor, cursor + 1)
       if self.flow_depth > 0 then self.flow_depth = self.flow_depth - 1 end
       cursor = cursor + 1
       at_content_start = false
@@ -674,8 +655,7 @@ function T:tokenize_line_content(line_in)
         cursor = cursor + 1
         at_content_start = false
       else
-        line, cursor = self:handle_plain(cursor, line)
-        at_content_start = false
+        plain()
       end
     elseif c == SQ or c == DQ then
       local floor
@@ -714,67 +694,60 @@ function T:tokenize_line_content(line_in)
           self.pending_block = { header_indent = owner, explicit_indent = explicit_indent(src, cursor, hdr_end), root = root }
           return
         end
-        fig.fail("InvalidBlockHeader")
+        fig.fail("a `|` or `>` header takes one indentation digit, one `+` or `-`, then a comment", cursor)
       end
-      line, cursor = self:handle_plain(cursor, line)
-      at_content_start = false
+      plain()
     elseif c == DASH then
       if not flow and at_content_start and followed_by_blank(src, cursor, line.e) then
-        if cursor > line.content_start and at(src, cursor - 1) == TAB then fig.fail("TabIndent") end
+        if cursor > line.content_start and at(src, cursor - 1) == TAB then fig.fail("a tab indents this `-` item; YAML indentation is spaces", cursor) end
         block_owner_indent = cursor - line.start
         self:add("dash", cursor, cursor + 1)
         cursor = cursor + 1
         at_content_start = true
       else
-        line, cursor = self:handle_plain(cursor, line)
-        at_content_start = false
+        plain()
       end
     elseif c == QUEST then
       if (flow or at_content_start) and followed_by_blank(src, cursor, line.e) then
         self:add("explicit_key", cursor, cursor + 1)
         cursor = cursor + 1
       else
-        line, cursor = self:handle_plain(cursor, line)
-        at_content_start = false
+        plain()
       end
     elseif c == BANG then
       if flow or at_content_start then
         local e = tag_end(src, cursor, line.e)
         if e then
-          if not tag_separated(src, e, line.e, flow) then fig.fail("InvalidTag") end
+          if not tag_separated(src, e, line.e, flow) then fig.fail("a tag must be followed by a space, a newline, or a flow indicator", e) end
           self:add("tag", cursor, e)
           cursor = e
         else
-          fig.fail("InvalidTag")
+          fig.fail("this is not a tag: a `!<...>` tag needs a name and a closing `>`", cursor)
         end
       else
-        line, cursor = self:handle_plain(cursor, line)
-        at_content_start = false
+        plain()
       end
     elseif c == AMP then
       if flow or at_content_start then
         local e = anchor_name_end(src, cursor + 1, line.e)
-        if e == cursor + 1 or not tag_separated(src, e, line.e, flow) then fig.fail("InvalidAnchor") end
+        if e == cursor + 1 or not tag_separated(src, e, line.e, flow) then fig.fail("an `&` anchor needs a name, then a space", cursor) end
         self:add("anchor", cursor, e)
         cursor = e
       else
-        line, cursor = self:handle_plain(cursor, line)
-        at_content_start = false
+        plain()
       end
     elseif c == STAR then
       if flow or at_content_start then
         local e = anchor_name_end(src, cursor + 1, line.e)
-        if e == cursor + 1 or not tag_separated(src, e, line.e, flow) then fig.fail("InvalidAlias") end
+        if e == cursor + 1 or not tag_separated(src, e, line.e, flow) then fig.fail("a `*` alias needs a name, then a space", cursor) end
         self:add("alias", cursor, e)
         cursor = e
         at_content_start = false
       else
-        line, cursor = self:handle_plain(cursor, line)
-        at_content_start = false
+        plain()
       end
     else
-      line, cursor = self:handle_plain(cursor, line)
-      at_content_start = false
+      plain()
     end
   end
 
@@ -806,7 +779,7 @@ function T:tokenize()
       local indent = line.content_start - line.start
       local first = at(src, line.content_start)
       if not self.flow_root and first ~= RBRACK and first ~= RBRACE and indent <= self.flow_open_indent then
-        fig.fail("InvalidIndent")
+        fig.fail("a line inside a flow collection must be indented past the line that opened it", line.content_start)
       end
       self:tokenize_line_content(line)
       if self.i == line.newline_end and line.newline_end > line.e then
@@ -843,7 +816,7 @@ function T:tokenize()
           indent_stack[#indent_stack + 1] = { indent = indent, prop_only = prop_only }
           current_indent = indent
         end
-        if indent ~= current_indent then fig.fail("InvalidIndent") end
+        if indent ~= current_indent then fig.fail("this line's indentation matches no block open above it", line.content_start) end
       end
 
       if at(src, line.content_start) == DASH and followed_by_blank(src, line.content_start, line.e) then
@@ -876,7 +849,7 @@ function T:tokenize()
         goto continue
       end
 
-      if self:tab_indented_structure(line) then fig.fail("TabIndent") end
+      if self:tab_indented_structure(line) then fig.fail("a tab indents this line; YAML indentation is spaces", line.content_start) end
 
       self:tokenize_line_content(line)
       if self.i == line.newline_end then
@@ -897,9 +870,9 @@ end
 
 
 -- ── scalars ───────────────────────────────────────────────────────────────
--- Decoding and resolution, as `parser.zig` does them: quoted strings with
--- their folds and escapes, block scalars with their chomping, and the
--- plain-scalar schema of each dialect.
+-- Decoding and resolution: quoted strings with their folds and escapes,
+-- block scalars with their chomping, and the plain-scalar schema of each
+-- dialect.
 
 local function eql_any(s, list)
   for _, x in ipairs(list) do
@@ -955,7 +928,7 @@ local function fold_plain_scalar(source)
 end
 
 local function single_quoted(source)
-  if #source < 2 or at(source, 0) ~= SQ or at(source, #source - 1) ~= SQ then fig.fail("UnclosedString") end
+  if #source < 2 or at(source, 0) ~= SQ or at(source, #source - 1) ~= SQ then fig.fail("this single-quoted string is never closed") end
   local inner = sub(source, 2, -2)
   if not find(inner, "'", 1, true) and not find(inner, "\n", 1, true) then return inner end
   local out = {}
@@ -971,7 +944,7 @@ local function single_quoted(source)
       out[#out + 1] = string.char(c)
       i = i + 1
     else
-      if at(inner, i + 1) ~= SQ then fig.fail("UnexpectedToken") end
+      if at(inner, i + 1) ~= SQ then fig.fail("a `'` inside a single-quoted string must be doubled") end
       out[#out + 1] = "'"
       i = i + 2
     end
@@ -980,21 +953,19 @@ local function single_quoted(source)
 end
 
 local function utf8_of(cp)
-  if (cp >= 0xD800 and cp <= 0xDFFF) or cp > 0x10FFFF then fig.fail("InvalidUnicodeEscape") end
+  if fig.is_surrogate(cp) or cp > 0x10FFFF then
+    fig.fail("an escape names no character: a surrogate, or a codepoint past U+10FFFF")
+  end
   return utf8.char(cp)
 end
 
--- `std.fmt.parseInt(u21, …, 16)` of the next `digits` bytes, quirks and
--- all: a leading sign and interior `_` separators are accepted there.
+-- The codepoint the `digits` hex digits at `start` spell.
 local function hex_escape(inner, start, digits)
-  if start + digits > #inner then fig.fail("UnclosedString") end
   local h = sub(inner, start + 1, start + digits)
-  local neg = false
-  if at(h, 0) == 43 then h = sub(h, 2) elseif at(h, 0) == DASH then neg = true; h = sub(h, 2) end
-  if #h == 0 or at(h, 0) == 95 or at(h, #h - 1) == 95 or not h:match("^[%x_]+$") then fig.fail("InvalidUnicodeEscape") end
-  local v = tonumber((h:gsub("_", "")), 16)
-  if v > 0x1FFFFF or (neg and v ~= 0) then fig.fail("InvalidUnicodeEscape") end
-  return v
+  if #h ~= digits or not h:match("^%x+$") then
+    fig.fail("an escape needs " .. digits .. " hex digits after it")
+  end
+  return tonumber(h, 16)
 end
 
 local SIMPLE_ESCAPES = {
@@ -1004,7 +975,7 @@ local SIMPLE_ESCAPES = {
 local CODEPOINT_ESCAPES = { [78] = 0x85, [95] = 0xA0, [76] = 0x2028, [80] = 0x2029 }
 
 local function double_quoted(source)
-  if #source < 2 or at(source, 0) ~= DQ or at(source, #source - 1) ~= DQ then fig.fail("UnclosedString") end
+  if #source < 2 or at(source, 0) ~= DQ or at(source, #source - 1) ~= DQ then fig.fail("this double-quoted string is never closed") end
   local inner = sub(source, 2, -2)
   if not find(inner, "\\", 1, true) and not find(inner, "\n", 1, true) then return inner end
   local out = {}
@@ -1021,7 +992,7 @@ local function double_quoted(source)
       i = i + 1
     else
       i = i + 1
-      if i >= n then fig.fail("UnclosedString") end
+      if i >= n then fig.fail("a `\\` at the end of a double-quoted string escapes nothing") end
       if at(inner, i) == CR and at(inner, i + 1) == NL then i = i + 1 end
       if at(inner, i) == NL then
         i = i + 1
@@ -1043,7 +1014,7 @@ local function double_quoted(source)
           out[#out + 1] = utf8_of(hex_escape(inner, i + 1, 8))
           i = i + 8
         else
-          fig.fail("UnexpectedToken")
+          fig.fail("unknown escape in a double-quoted string")
         end
         i = i + 1
       end
@@ -1161,41 +1132,26 @@ local function is_inf_nan(source)
   return eql_any(source, { ".nan", ".NaN", ".NAN" })
 end
 
--- The 1.2 core schema's numbers: "int", "float" or nil.
+-- The 1.2 core schema's numbers: a hex or octal lexeme, or decimal
+-- digits with an optional fraction and an optional exponent — "int",
+-- "float" or nil.
+
+-- Whether `body` is a mantissa with a fraction or an exponent, and so a
+-- float rather than an int.
+local function core_float(body)
+  local mantissa, exponent = body:match("^(.-)([eE][-+]?%d+)$")
+  if not exponent then mantissa = body end
+  if mantissa:match("^%d+%.%d*$") or mantissa:match("^%.%d+$") then return true end
+  return exponent ~= nil and mantissa:match("^%d+$") ~= nil
+end
+
 local function classify_number(source)
-  local n = #source
-  if n == 0 then return nil end
   if is_inf_nan(source) then return "float" end
-  if n > 2 and at(source, 0) == 48 and (at(source, 1) == 120 or at(source, 1) == 111) then
-    local hex = at(source, 1) == 120
-    for i = 2, n - 1 do
-      local c = at(source, i)
-      if not (hex and is_hex(c) or (not hex and is_octal(c))) then return nil end
-    end
-    return "int"
-  end
-  local i = 0
-  local c = at(source, 0)
-  if c == 43 or c == DASH then i = 1 end
-  local mantissa = 0
-  while i < n and is_digit(at(source, i)) do i = i + 1; mantissa = mantissa + 1 end
-  local float = false
-  if i < n and at(source, i) == DOT then
-    float = true
-    i = i + 1
-    while i < n and is_digit(at(source, i)) do i = i + 1; mantissa = mantissa + 1 end
-  end
-  if mantissa == 0 then return nil end
-  if i < n and (at(source, i) == 101 or at(source, i) == 69) then
-    float = true
-    i = i + 1
-    if i < n and (at(source, i) == 43 or at(source, i) == DASH) then i = i + 1 end
-    local exp = 0
-    while i < n and is_digit(at(source, i)) do i = i + 1; exp = exp + 1 end
-    if exp == 0 then return nil end
-  end
-  if i ~= n then return nil end
-  return float and "float" or "int"
+  if source:match("^0x%x+$") or source:match("^0o[0-7]+$") then return "int" end
+  local body = source:match("^[-+](.*)$") or source
+  if body:match("^%d+$") then return "int" end
+  if core_float(body) then return "float" end
+  return nil
 end
 
 -- ── YAML 1.1 resolution ───────────────────────────────────────────────────
@@ -1206,169 +1162,60 @@ local function bool_1_1(source)
   return nil
 end
 
-local function digit_run(s, pred)
-  local any = false
-  for i = 0, #s - 1 do
-    local c = at(s, i)
-    if c ~= 95 then
-      if not pred(c) then return false end
-      any = true
-    end
-  end
-  return any
+-- A run of `cls` digits with `_` separators anywhere between them, at
+-- least one digit: 1.1 spells `0b1010_1010` and `0x_FF` alike.
+local function digit_run(s, cls)
+  return s:match("^[" .. cls .. "_]*[" .. cls .. "][" .. cls .. "_]*$") ~= nil
 end
 
+-- 1.1's base-10 float: an optional integer part, a `.`, and an exponent
+-- whose sign is not optional.
 local function is_1_1_base10_float(s)
-  local i = 0
-  local n = #s
-  if i < n and is_digit(at(s, i)) then
-    i = i + 1
-    while i < n and (is_digit(at(s, i)) or at(s, i) == 95) do i = i + 1 end
+  local mantissa = s:match("^(.-)[eE][-+]%d+$")
+  if not mantissa then
+    if find(s, "e", 1, true) or find(s, "E", 1, true) then return false end
+    mantissa = s
   end
-  if i >= n or at(s, i) ~= DOT then return false end
-  i = i + 1
-  while i < n and (is_digit(at(s, i)) or at(s, i) == 95) do i = i + 1 end
-  if i < n and (at(s, i) == 101 or at(s, i) == 69) then
-    i = i + 1
-    if i >= n or (at(s, i) ~= 43 and at(s, i) ~= DASH) then return false end
-    i = i + 1
-    local exp = 0
-    while i < n and is_digit(at(s, i)) do i = i + 1; exp = exp + 1 end
-    if exp == 0 then return false end
-  end
-  return i == n
+  return mantissa:match("^%d[%d_]*%.[%d_]*$") ~= nil or mantissa:match("^%.[%d_]*$") ~= nil
 end
 
+-- 1.1's sexagesimal: `1:30`, `190:20:30.15` — groups of at most two
+-- digits under sixty after the first. A leading zero on the first group
+-- makes it an octal instead, unless a fraction follows.
 local function classify_1_1_base60(s)
-  local body = s
-  local float = false
   local dot = find(s, ".", 1, true)
-  if dot then
-    float = true
-    for i = dot, #s - 1 do
-      local c = at(s, i)
-      if not (is_digit(c) or c == 95) then return nil end
-    end
-    body = sub(s, 1, dot - 1)
+  if dot and not sub(s, dot + 1):match("^[%d_]*$") then return nil end
+  local body = dot and sub(s, 1, dot - 1) or s
+  local head, rest = body:match("^(%d[%d_]*)(:.*)$")
+  if not head then return nil end
+  if not dot and at(head, 0) == 48 then return nil end
+  for g in rest:gmatch(":([^:]*)") do
+    if not (g:match("^%d$") or g:match("^[0-5]%d$")) then return nil end
   end
-  local idx = 0
-  local trailing = 0
-  for g in (body .. ":"):gmatch("([^:]*):") do
-    if #g == 0 then return nil end
-    if idx == 0 then
-      if not is_digit(at(g, 0)) then return nil end
-      if not float and at(g, 0) == 48 then return nil end
-      for i = 1, #g - 1 do
-        local c = at(g, i)
-        if not (is_digit(c) or c == 95) then return nil end
-      end
-    else
-      if #g > 2 then return nil end
-      for i = 0, #g - 1 do
-        if not is_digit(at(g, i)) then return nil end
-      end
-      if #g == 2 and at(g, 0) > 53 then return nil end
-      trailing = trailing + 1
-    end
-    idx = idx + 1
-  end
-  if trailing == 0 then return nil end
-  return float and "float" or "int"
+  return dot and "float" or "int"
 end
 
 local function classify_1_1_number(source)
   if #source == 0 then return nil end
   if is_inf_nan(source) then return "float" end
-  local s = source
-  local c = at(s, 0)
-  if c == 43 or c == DASH then s = sub(s, 2) end
-  if #s == 0 then return nil end
+  local s = source:match("^[-+](.*)$") or source
   if find(s, ":", 1, true) then return classify_1_1_base60(s) end
-  if #s >= 2 and at(s, 0) == 48 and (at(s, 1) == 120 or at(s, 1) == 88) then
-    return digit_run(sub(s, 3), is_hex) and "int" or nil
-  end
-  if #s >= 2 and at(s, 0) == 48 and (at(s, 1) == 98 or at(s, 1) == 66) then
-    return digit_run(sub(s, 3), is_binary) and "int" or nil
-  end
-  if find(s, ".", 1, true) then
-    return is_1_1_base10_float(s) and "float" or nil
-  end
-  if #s >= 2 and at(s, 0) == 48 then
-    return digit_run(sub(s, 2), is_octal) and "int" or nil
-  end
-  if #s == 1 and at(s, 0) == 48 then return "int" end
-  local first = at(s, 0)
-  if first >= 49 and first <= 57 then
-    for i = 1, #s - 1 do
-      local cc = at(s, i)
-      if not (is_digit(cc) or cc == 95) then return nil end
-    end
-    return "int"
-  end
-  return nil
+  if s:match("^0[xX]") then return digit_run(sub(s, 3), "%x") and "int" or nil end
+  if s:match("^0[bB]") then return digit_run(sub(s, 3), "01") and "int" or nil end
+  if find(s, ".", 1, true) then return is_1_1_base10_float(s) and "float" or nil end
+  if #s >= 2 and at(s, 0) == 48 then return digit_run(sub(s, 2), "0-7") and "int" or nil end
+  return s:match("^%d[%d_]*$") and "int" or nil
 end
 
--- `util/datetime.zig`'s validator, as the 1.1 timestamp needs it: a
--- date, or a date-time with seconds and an optional zone; no time-only
--- and no minute precision.
-local function two(s, i) return (at(s, i) - 48) * 10 + (at(s, i + 1) - 48) end
-local function both_digits(s, i) return i + 1 < #s and is_digit(at(s, i)) and is_digit(at(s, i + 1)) end
-
-local function valid_date(s)
-  if #s ~= 10 or at(s, 4) ~= DASH or at(s, 7) ~= DASH then return false end
-  if not (both_digits(s, 0) and both_digits(s, 2) and both_digits(s, 5) and both_digits(s, 8)) then return false end
-  local year = two(s, 0) * 100 + two(s, 2)
-  local month, day = two(s, 5), two(s, 8)
-  if month < 1 or month > 12 then return false end
-  local days = ({ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 })[month]
-  if month == 2 and ((year % 4 == 0 and year % 100 ~= 0) or year % 400 == 0) then days = 29 end
-  return day >= 1 and day <= days
-end
-
-local function valid_time(s)
-  if #s < 5 or at(s, 2) ~= COLON then return false end
-  if not (both_digits(s, 0) and both_digits(s, 3)) then return false end
-  if two(s, 0) > 23 or two(s, 3) > 59 then return false end
-  if #s == 5 then return false end
-  if at(s, 5) ~= COLON or #s < 8 then return false end
-  if not both_digits(s, 6) or two(s, 6) > 60 then return false end
-  if #s == 8 then return true end
-  if at(s, 8) ~= DOT or #s < 10 then return false end
-  return sub(s, 10):match("^%d+$") ~= nil
-end
-
-local function valid_offset(s)
-  if #s ~= 6 or at(s, 3) ~= COLON then return false end
-  if not (both_digits(s, 1) and both_digits(s, 4)) then return false end
-  return two(s, 1) <= 23 and two(s, 4) <= 59
-end
-
-local function classify_1_1_timestamp(raw)
-  if #raw < 10 then return nil end
-  if not valid_date(sub(raw, 1, 10)) then return nil end
-  if #raw == 10 then return "local_date" end
-  local sep = at(raw, 10)
-  if sep ~= 84 and sep ~= 116 and sep ~= SP then return nil end
-  local rest = sub(raw, 12)
-  local time_str = rest
-  local has_offset = false
-  local lastc = at(rest, #rest - 1)
-  if #rest > 0 and (lastc == 90 or lastc == 122) then
-    time_str = sub(rest, 1, -2)
-    has_offset = true
-  elseif #rest >= 6 and (at(rest, #rest - 6) == 43 or at(rest, #rest - 6) == DASH) and at(rest, #rest - 3) == COLON then
-    if not valid_offset(sub(rest, -6)) then return nil end
-    time_str = sub(rest, 1, -7)
-    has_offset = true
-  end
-  if not valid_time(time_str) then return nil end
-  return has_offset and "offset_datetime" or "local_datetime"
-end
+-- 1.1's timestamp, which is `fig.datetime`'s with two of its dialect
+-- switches off: a bare `12:30:00` is sexagesimal here, not a time, and
+-- the seconds of a datetime are not optional.
+local TIMESTAMP_1_1 = { time_only = false, minute_precision = false }
 
 -- ── the parser ────────────────────────────────────────────────────────────
--- `parser.zig`: a container stack over the token stream. Nodes are the
--- prelude's tree nodes, given their properties, markers and separators
--- as the compiled parser records them, and laid out by `fig.rows`.
+-- A container stack over the token stream. Nodes are the prelude's tree
+-- nodes, given their properties, markers and separators, and laid out by
+-- `fig.rows`.
 
 local P = {}
 P.__index = P
@@ -1376,17 +1223,23 @@ P.__index = P
 local function new_parser(src, tokens, version)
   return setmetatable({
     src = src, tokens = tokens, index = 1, version = version,
-    nodes = {}, anchors = {}, stack = {},
+    nodes = {}, anchors = {}, stack = {}, tag_directives = {},
+    -- the properties and the comments waiting for the node they belong to
     pending_tag = nil, pending_anchor = nil, container_tag = nil, container_anchor = nil,
-    tag_directives = {},
-    pending_leading = {}, last_value_id = nil, colon_line = false,
-    parking_container = false, force_new_container = false, value_only_indents = 0,
-    root = nil, doc_started = false, doc_ended = false, on_doc_start_line = false,
+    pending_leading = {}, last_value_id = nil, root = nil,
+    -- where the line stands: a `:` seen, a container parked while its
+    -- properties are read, an `indent` that must open a new one
+    colon_line = false, parking_container = false, force_new_container = false,
+    value_only_indents = 0,
+    -- the document: `---`, `...`, and the directives above them
+    doc_started = false, doc_ended = false, on_doc_start_line = false,
     directives_pending = false, yaml_directive_seen = false,
   }, P)
 end
 
-local function fail(name) fig.fail(name) end
+-- Refuse the document, in this script's own words — at an offset when
+-- one is at hand.
+local fail = fig.fail
 
 function P:peek() return self.tokens[self.index] end
 
@@ -1442,8 +1295,7 @@ end
 -- ── comments ──
 
 local function comment_text(raw)
-  local body = at(raw, 0) == HASH and sub(raw, 2) or raw
-  return (body:gsub("^[ \t\r]+", ""):gsub("[ \t\r]+$", ""))
+  return fig.trim_comment(at(raw, 0) == HASH and sub(raw, 2) or raw)
 end
 
 function P:current() return self.stack[#self.stack] end
@@ -1511,7 +1363,7 @@ function P:span_of(id) return self.nodes[id + 1].span end
 
 -- ── properties ──
 
-function P:validate_tag_handle(text)
+function P:validate_tag_handle(text, pos)
   if #text < 2 then return end
   local c1 = at(text, 1)
   if c1 == LT or c1 == BANG then return end
@@ -1521,13 +1373,13 @@ function P:validate_tag_handle(text)
   for _, d in ipairs(self.tag_directives) do
     if d.handle == handle then return end
   end
-  fail("UndefinedTagHandle")
+  fail("tag handle `" .. handle .. "` was never declared by a `%TAG` directive", pos)
 end
 
 function P:stash_tag(text, s, e)
-  self:validate_tag_handle(text)
+  self:validate_tag_handle(text, s)
   if self.pending_tag then
-    if self.container_tag then fail("DuplicateProperty") end
+    if self.container_tag then fail("a node takes one tag", s) end
     self.container_tag = self.pending_tag
     self.pending_tag = nil
   end
@@ -1536,7 +1388,7 @@ end
 
 function P:stash_anchor(name, s, e)
   if self.pending_anchor then
-    if self.container_anchor then fail("DuplicateProperty") end
+    if self.container_anchor then fail("a node takes one anchor", s) end
     self.container_anchor = self.pending_anchor
     self.pending_anchor = nil
   end
@@ -1619,8 +1471,16 @@ function P:open_container(kind, start)
   return id
 end
 
+-- A container opened for the node in hand that continues the sequence
+-- item or the explicit key above it, rather than standing on its own.
+function P:open_nested(kind, start)
+  local id = self:open_container(kind, start or self:peek().s)
+  self:container_by_id(id).continues_sequence_item = true
+  return id
+end
+
 function P:close_container(span_end)
-  if #self.stack == 0 then fail("UnexpectedToken") end
+  if #self.stack == 0 then fail("nothing is open here to close", span_end) end
   local c = table.remove(self.stack)
   if c.first_child == nil then self:span_of(c.id)[2] = span_end end
   return c.id
@@ -1635,7 +1495,7 @@ function P:ensure_container(kind)
       for i = 1, #self.stack - 1 do
         if self.stack[i].kind == "mapping" then has_enclosing_mapping = true end
       end
-      if not has_enclosing_mapping then fail("UnexpectedToken") end
+      if not has_enclosing_mapping then fail("a `key:` here would belong to no mapping: the item it is in already holds a value", self:peek().s) end
       self:close_pending_empty_value()
       local id = self:close_container(self:span_of(current.id)[2])
       self:finish_value(id)
@@ -1680,7 +1540,7 @@ end
 function P:finish_value(value_id)
   self.last_value_id = value_id
   if #self.stack == 0 then
-    if self.root ~= nil then fail("UnexpectedToken") end
+    if self.root ~= nil then fail("a second top-level value; a document holds one", self:span_of(value_id)[1]) end
     self.root = value_id
     return
   end
@@ -1702,7 +1562,7 @@ function P:finish_value(value_id)
       return
     end
     local key_id = parent.pending_key
-    if key_id == nil then fail("UnexpectedToken") end
+    if key_id == nil then fail("a value with no key", self:span_of(value_id)[1]) end
     parent.pending_key = nil
     parent.explicit_awaiting_value = false
     if parent.pending_value_trailing then
@@ -1775,7 +1635,7 @@ function P:scalar_kind(source)
     if b ~= nil then return "bool", b and "true" or "false" end
     local num = classify_1_1_number(source)
     if num then return num, source end
-    local ts = classify_1_1_timestamp(source)
+    local ts = DT.classify(source, TIMESTAMP_1_1)
     if ts then return "string", source, ts end
     return "string", source
   end
@@ -1789,14 +1649,14 @@ end
 
 function P:parse_scalar()
   local t = self:peek()
-  if t.kind ~= "scalar" then fail("UnexpectedToken") end
+  if t.kind ~= "scalar" then fail("expected a scalar here", t.s) end
   self:advance()
   local kind, text, ext = self:scalar_kind(self:text(t))
   return self:add_node(kind, t.s, t.e, { text = text, ext_kind = ext })
 end
 
 function P:parse_alias()
-  if self.pending_anchor or self.pending_tag then fail("UnexpectedToken") end
+  if self.pending_anchor or self.pending_tag then fail("an alias carries no anchor or tag of its own", self:peek().s) end
   local t = self:advance()
   return self:add_node("alias", t.s, t.e, { text = sub(self.src, t.s + 2, t.e) })
 end
@@ -1849,7 +1709,7 @@ end
 function P:require_value_end()
   while self:peek().kind == "whitespace" do self:advance() end
   local k = self:peek().kind
-  if not (k == "newline" or k == "comment" or k == "dedent" or k == "end_of_file") then fail("UnexpectedToken") end
+  if not (k == "newline" or k == "comment" or k == "dedent" or k == "end_of_file") then fail("a value must end its line; nothing may follow it but a comment", self:peek().s) end
 end
 
 function P:tab_between(from, to)
@@ -1895,10 +1755,10 @@ function P:parse_flow_node()
   if k == "flow_map_start" then return self:parse_flow_mapping() end
   if k == "alias" then return self:parse_alias() end
   if k == "scalar" then
-    if invalid_flow_scalar(self:text(self:peek())) then fail("UnexpectedToken") end
+    if invalid_flow_scalar(self:text(self:peek())) then fail("a plain scalar inside a flow collection cannot begin this way", self:peek().s) end
     return self:parse_scalar()
   end
-  fail("UnexpectedToken")
+  fail("expected a value inside this flow collection", self:peek().s)
 end
 
 function P:wrap_flow_pair(key_id, value_id)
@@ -1919,7 +1779,7 @@ function P:parse_flow_sequence_item()
   if k == "colon" then
     key_id = self:add_null(self:peek().s, self:peek().e)
   elseif k == "comma" or k == "flow_seq_end" then
-    if not explicit then fail("UnexpectedToken") end
+    if not explicit then fail("expected a value before this `,` or `]`", self:peek().s) end
     key_id = self:add_null(self:peek().s, self:peek().e)
   else
     key_id = self:parse_flow_node()
@@ -1949,7 +1809,7 @@ function P:parse_flow_sequence()
   local seq = self:node(seq_id)
   self:skip_flow_trivia()
   while self:peek().kind ~= "flow_seq_end" do
-    if self:peek().kind == "end_of_file" then fail("UnexpectedToken") end
+    if self:peek().kind == "end_of_file" then fail("this flow sequence is never closed", open.s) end
     local item = self:parse_flow_sequence_item()
     seq.items[#seq.items + 1] = self:node(item)
     self:skip_flow_trivia()
@@ -1958,7 +1818,7 @@ function P:parse_flow_sequence()
       self:advance()
       self:skip_flow_trivia()
     elseif k ~= "flow_seq_end" then
-      fail("UnexpectedToken")
+      fail("expected `,` or `]` here", self:peek().s)
     end
   end
   local close = self:advance()
@@ -1972,7 +1832,7 @@ function P:parse_flow_mapping()
   local map = self:node(map_id)
   self:skip_flow_trivia()
   while self:peek().kind ~= "flow_map_end" do
-    if self:peek().kind == "end_of_file" then fail("UnexpectedToken") end
+    if self:peek().kind == "end_of_file" then fail("this flow mapping is never closed", open.s) end
     if self:peek().kind == "explicit_key" then
       self:advance()
       self:skip_flow_trivia()
@@ -2009,7 +1869,7 @@ function P:parse_flow_mapping()
       self:advance()
       self:skip_flow_trivia()
     elseif nk ~= "flow_map_end" then
-      fail("UnexpectedToken")
+      fail("expected `,` or `}` here", self:peek().s)
     end
   end
   local close = self:advance()
@@ -2025,7 +1885,7 @@ function P:parse_mapping_value(allow_compact)
   local k = self:peek().kind
   if k == "scalar" then
     if allow_compact and self:is_mapping_start() then
-      if self:tab_between(self:current().pending_value_span, self:peek().s) then fail("UnexpectedToken") end
+      if self:tab_between(self:current().pending_value_span, self:peek().s) then fail("a tab cannot separate a key from the `:` above it", self:peek().s) end
       local child_id = self:open_container("mapping", self:peek().s)
       self:parse_mapping_entry()
       local id = self:close_container(self:span_of(child_id)[2])
@@ -2036,9 +1896,8 @@ function P:parse_mapping_value(allow_compact)
       self:require_value_end()
     end
   elseif k == "dash" then
-    if not allow_compact then fail("UnexpectedToken") end
-    local seq_id = self:open_container("sequence", self:peek().s)
-    self:container_by_id(seq_id).continues_sequence_item = true
+    if not allow_compact then fail("a `-` item cannot begin on the line of the `:` it belongs to", self:peek().s) end
+    self:open_nested("sequence")
     self:parse_sequence_entry()
   elseif k == "block_header" then
     self:finish_value(self:parse_block_scalar())
@@ -2051,7 +1910,7 @@ function P:parse_mapping_value(allow_compact)
   elseif k == "newline" or k == "dedent" or k == "end_of_file" then
     -- deferred
   else
-    fail("UnexpectedToken")
+    fail("expected a value after `:`", self:peek().s)
   end
 end
 
@@ -2062,7 +1921,7 @@ function P:parse_mapping_entry()
   self:release_key_line_props(held)
   local key_id = self:parse_key_node()
   self:skip_trivia_no_newline()
-  if self:peek().kind ~= "colon" then fail("UnexpectedToken") end
+  if self:peek().kind ~= "colon" then fail("expected `:` after this key", self:peek().s) end
   local colon = self:advance()
   local parent = self:container_by_id(mapping_id)
   parent.pending_key = key_id
@@ -2099,11 +1958,10 @@ function P:parse_explicit_key()
   local key_id
   if k == "scalar" then
     if self:is_mapping_start() then
-      if self:tab_between(marker.e, self:peek().s) then fail("UnexpectedToken") end
+      if self:tab_between(marker.e, self:peek().s) then fail("a tab cannot separate `?` from its key", self:peek().s) end
       m.building_explicit_key = true
       m.explicit_key_col = self:column_of(marker.s)
-      local key_map_id = self:open_container("mapping", self:peek().s)
-      self:container_by_id(key_map_id).continues_sequence_item = true
+      self:open_nested("mapping")
       self:parse_mapping_entry()
       return
     end
@@ -2114,8 +1972,7 @@ function P:parse_explicit_key()
     if self:peek().kind == "colon" then
       m.building_explicit_key = true
       m.explicit_key_col = self:column_of(marker.s)
-      local key_map_id = self:open_container("mapping", self:span_of(node_id)[1])
-      self:container_by_id(key_map_id).continues_sequence_item = true
+      local key_map_id = self:open_nested("mapping", self:span_of(node_id)[1])
       local colon = self:advance()
       local km = self:container_by_id(key_map_id)
       km.pending_key = node_id
@@ -2132,21 +1989,19 @@ function P:parse_explicit_key()
   elseif k == "dash" then
     m.building_explicit_key = true
     m.explicit_key_col = self:column_of(marker.s)
-    local seq_id = self:open_container("sequence", self:peek().s)
-    self:container_by_id(seq_id).continues_sequence_item = true
+    self:open_nested("sequence")
     self:parse_sequence_entry()
     return
   elseif k == "colon" then
     m.building_explicit_key = true
     m.explicit_key_col = self:column_of(marker.s)
-    local key_map_id = self:open_container("mapping", self:peek().s)
-    self:container_by_id(key_map_id).continues_sequence_item = true
+    self:open_nested("mapping")
     self:parse_empty_key_entry()
     return
   elseif k == "newline" or k == "dedent" or k == "end_of_file" then
     key_id = self:add_null(marker.e, marker.e)
   else
-    fail("UnexpectedToken")
+    fail("expected a key after `?`", self:peek().s)
   end
   local parent = self:container_by_id(mapping_id)
   parent.pending_key = key_id
@@ -2170,8 +2025,7 @@ function P:parse_sequence_entry()
   elseif k == "scalar" then
     if self:is_mapping_start() then
       local held = self:hold_key_line_props()
-      local mapping_id = self:open_container("mapping", self:peek().s)
-      self:container_by_id(mapping_id).continues_sequence_item = true
+      self:open_nested("mapping")
       self:release_key_line_props(held)
       self:parse_mapping_entry()
     else
@@ -2181,8 +2035,7 @@ function P:parse_sequence_entry()
     self:finish_value(self:parse_block_scalar())
   elseif k == "alias" then
     if self:is_mapping_start() then
-      local mapping_id = self:open_container("mapping", self:peek().s)
-      self:container_by_id(mapping_id).continues_sequence_item = true
+      self:open_nested("mapping")
       self:parse_mapping_entry()
     else
       self:finish_value(self:parse_alias())
@@ -2190,19 +2043,16 @@ function P:parse_sequence_entry()
   elseif k == "flow_seq_start" or k == "flow_map_start" then
     self:finish_value(self:parse_flow_node())
   elseif k == "explicit_key" then
-    local mapping_id = self:open_container("mapping", self:peek().s)
-    self:container_by_id(mapping_id).continues_sequence_item = true
+    self:open_nested("mapping")
     self:parse_explicit_key()
   elseif k == "colon" then
-    local mapping_id = self:open_container("mapping", self:peek().s)
-    self:container_by_id(mapping_id).continues_sequence_item = true
+    self:open_nested("mapping")
     self:parse_empty_key_entry()
   elseif k == "dash" then
-    local inner_id = self:open_container("sequence", self:peek().s)
-    self:container_by_id(inner_id).continues_sequence_item = true
+    self:open_nested("sequence")
     self:parse_sequence_entry()
   else
-    fail("UnexpectedToken")
+    fail("expected a value after `-`", self:peek().s)
   end
 end
 
@@ -2220,41 +2070,50 @@ local function is_yaml_version(s)
   return major ~= nil and minor ~= nil
 end
 
-local function require_directive_end(line, i)
+local function require_directive_end(line, i, base)
   local j = skip_directive_space(line, i)
-  if j < #line and at(line, j) ~= HASH then fail("InvalidDirective") end
+  if j < #line and at(line, j) ~= HASH then
+    fail("a directive takes nothing after its arguments but a comment", base + j)
+  end
 end
 
-function P:parse_directive(line)
+function P:parse_directive(tok)
+  local line, base = self:text(tok), tok.s
   local i = 1
   local name_start = i
   while i < #line and not is_directive_space(at(line, i)) do i = i + 1 end
   local name = sub(line, name_start + 1, i)
-  if #name == 0 then fail("InvalidDirective") end
+  if #name == 0 then fail("a `%` directive needs a name", base) end
   if name == "YAML" then
-    if self.yaml_directive_seen then fail("InvalidDirective") end
+    if self.yaml_directive_seen then fail("a second `%YAML` directive", base) end
     self.yaml_directive_seen = true
     i = skip_directive_space(line, i)
     local ver_start = i
     while i < #line and not is_directive_space(at(line, i)) do i = i + 1 end
-    if not is_yaml_version(sub(line, ver_start + 1, i)) then fail("InvalidDirective") end
-    require_directive_end(line, i)
+    if not is_yaml_version(sub(line, ver_start + 1, i)) then fail("a `%YAML` directive takes a version like `1.2`", base + ver_start) end
+    require_directive_end(line, i, base)
   elseif name == "TAG" then
     i = skip_directive_space(line, i)
     local handle_start = i
     while i < #line and not is_directive_space(at(line, i)) do i = i + 1 end
     local handle = sub(line, handle_start + 1, i)
-    if #handle == 0 then fail("InvalidDirective") end
+    if #handle == 0 then fail("a `%TAG` directive takes a handle and a prefix", base + i) end
     i = skip_directive_space(line, i)
     local prefix_start = i
     while i < #line and not is_directive_space(at(line, i)) do i = i + 1 end
-    if i == prefix_start then fail("InvalidDirective") end
-    require_directive_end(line, i)
+    if i == prefix_start then fail("a `%TAG` directive takes a handle and a prefix", base + prefix_start) end
+    require_directive_end(line, i, base)
     self.tag_directives[#self.tag_directives + 1] = { handle = handle, prefix = sub(line, prefix_start + 1, i) }
   end
 end
 
 -- ── the main loop ──
+
+-- The token kinds that would begin a second document after a `...` line.
+local CONTENT_AFTER_END = {
+  dash = true, explicit_key = true, colon = true, scalar = true, alias = true,
+  block_header = true, flow_seq_start = true, flow_map_start = true, tag = true, anchor = true,
+}
 
 local function invalid_plain_start(source)
   if #source == 0 then return false end
@@ -2273,7 +2132,7 @@ function P:resolve_aliases_or_fail()
         if a.node >= id then break end
         if a.name == n.text then found = true end
       end
-      if not found then fail("UndefinedAlias") end
+      if not found then fail("alias `*" .. n.text .. "` names an anchor that is not defined above it", n.span[1]) end
     end
   end
 end
@@ -2283,10 +2142,13 @@ function P:parse()
     self:skip_trivia_no_newline()
     local k = self:peek().kind
     if self.value_only_indents > 0 and not (k == "newline" or k == "dedent" or k == "end_of_file") then
-      fail("UnexpectedToken")
+      fail("nothing may follow a value on the line it was indented onto", self:peek().s)
     end
     if self.directives_pending and not (k == "directive" or k == "newline" or k == "doc_start") then
-      fail("InvalidDirective")
+      fail("a directive must be followed by `---`", self:peek().s)
+    end
+    if self.doc_ended and CONTENT_AFTER_END[k] then
+      fail("content after `...` begins a second document; this format reads one per file", self:peek().s)
     end
     if k == "indent" then
       if #self.stack > 0 and self:current().continues_sequence_item then
@@ -2333,33 +2195,30 @@ function P:parse()
       self.on_doc_start_line = false
       self:advance()
     elseif k == "doc_start" then
-      if self.doc_started or #self.nodes > 0 then fail("MultipleDocuments") end
+      if self.doc_started or #self.nodes > 0 then fail("a second document begins here; this format reads one document per file", self:peek().s) end
       self.doc_started = true
       self.on_doc_start_line = true
       self.directives_pending = false
       self:advance()
     elseif k == "directive" then
       if self.doc_started or self.doc_ended or self.root ~= nil or #self.nodes > 0 or #self.stack > 0 then
-        fail("InvalidDirective")
+        fail("a directive must come before the document it applies to", self:peek().s)
       end
       local tok = self:advance()
-      self:parse_directive(self:text(tok))
+      self:parse_directive(tok)
       self.directives_pending = true
     elseif k == "doc_end" then
       self.doc_ended = true
       self:advance()
     elseif k == "dash" then
-      if self.doc_ended then fail("MultipleDocuments") end
-      if self.on_doc_start_line then fail("UnexpectedToken") end
-      if self:pending_prop_on_line_of(self:peek().s) then fail("UnexpectedToken") end
+      if self.on_doc_start_line then fail("a `-` item cannot share the `---` line", self:peek().s) end
+      if self:pending_prop_on_line_of(self:peek().s) then fail("an anchor or a tag cannot precede the `-` of a sequence item", self:peek().s) end
       self:close_sequence_item_continuation()
       self:parse_sequence_entry()
     elseif k == "explicit_key" then
-      if self.doc_ended then fail("MultipleDocuments") end
       self:close_sequence_item_continuation()
       self:parse_explicit_key()
     elseif k == "colon" then
-      if self.doc_ended then fail("MultipleDocuments") end
       self:close_open_complex_key()
       if #self.stack > 0 and self:current().building_explicit_key then
         local null_key = self:add_null(self:peek().s, self:peek().s)
@@ -2379,21 +2238,19 @@ function P:parse()
         self:parse_empty_key_entry()
       end
     elseif k == "scalar" then
-      if self.doc_ended then fail("MultipleDocuments") end
       self:close_sequence_item_continuation()
       if self:is_mapping_start() then
-        if self.on_doc_start_line then fail("UnexpectedToken") end
+        if self.on_doc_start_line then fail("a mapping cannot begin on the `---` line", self:peek().s) end
         self:parse_mapping_entry()
       elseif #self.stack == 0 and self.root == nil then
-        if invalid_plain_start(self:text(self:peek())) then fail("UnexpectedToken") end
+        if invalid_plain_start(self:text(self:peek())) then fail("a plain scalar cannot begin with `,` or `? `", self:peek().s) end
         self:finish_value(self:parse_scalar())
       elseif self.force_new_container and self:current_awaits_value() then
         self:attach_deferred_value(self:parse_scalar())
       else
-        fail("UnexpectedToken")
+        fail("unexpected value here", self:peek().s)
       end
     elseif k == "alias" then
-      if self.doc_ended then fail("MultipleDocuments") end
       self:close_sequence_item_continuation()
       if self:is_mapping_start() then
         self:parse_mapping_entry()
@@ -2402,26 +2259,24 @@ function P:parse()
       elseif self.force_new_container and self:current_awaits_value() then
         self:attach_deferred_value(self:parse_alias())
       else
-        fail("UnexpectedToken")
+        fail("unexpected alias here", self:peek().s)
       end
     elseif k == "block_header" then
-      if self.doc_ended then fail("MultipleDocuments") end
       self:close_sequence_item_continuation()
       if #self.stack == 0 and self.root == nil then
         self:finish_value(self:parse_block_scalar())
       elseif self.force_new_container and self:current_awaits_value() then
         self:attach_deferred_value(self:parse_block_scalar())
       else
-        fail("UnexpectedToken")
+        fail("unexpected block scalar here", self:peek().s)
       end
     elseif k == "flow_seq_start" or k == "flow_map_start" then
-      if self.doc_ended then fail("MultipleDocuments") end
       self:close_sequence_item_continuation()
       local node_id = self:parse_flow_node()
       self:skip_trivia_no_newline()
       if self:peek().kind == "colon" then
         local span = self:span_of(node_id)
-        if find(sub(self.src, span[1] + 1, span[2]), "\n", 1, true) then fail("UnexpectedToken") end
+        if find(sub(self.src, span[1] + 1, span[2]), "\n", 1, true) then fail("a flow collection spanning lines cannot be a key", span[1]) end
         local mapping_id = self:ensure_container("mapping")
         self:close_pending_empty_value()
         local colon = self:advance()
@@ -2434,19 +2289,18 @@ function P:parse()
         self:attach_deferred_value(node_id)
       end
     elseif k == "tag" or k == "anchor" then
-      if self.doc_ended then fail("MultipleDocuments") end
       local in_container = #self.stack > 0
       self:consume_pending_properties()
       if in_container then
         local nk = self:peek().kind
         if nk == "newline" or nk == "dedent" or nk == "end_of_file" then
-          if not (self.force_new_container and self:current_awaits_value()) then fail("UnexpectedToken") end
+          if not (self.force_new_container and self:current_awaits_value()) then fail("an anchor or a tag here belongs to no node", self:peek().s) end
         end
       end
     elseif k == "end_of_file" then
       break
     else
-      fail("UnexpectedToken")
+      fail("unexpected token here", self:peek().s)
     end
   end
 
@@ -2455,7 +2309,7 @@ function P:parse()
     local id = self:close_container(self:peek().e)
     self:finish_value(id)
   end
-  if self.container_anchor or self.container_tag then fail("DuplicateProperty") end
+  if self.container_anchor or self.container_tag then fail("a node takes one anchor and one tag", (self.container_anchor or self.container_tag).s) end
   self:resolve_aliases_or_fail()
   local root = self.root
   if root == nil then root = self:add_null(self:peek().s, self:peek().e) end
@@ -2474,169 +2328,54 @@ function M.parse(dialect, input)
 end
 
 -- ── the printer ───────────────────────────────────────────────────────────
--- `printer.zig`: block style, two-space indentation whatever the options
--- say, a flow form for a collection value that fits `width` and carries
--- nothing flow cannot spell, a `|` block for a multi-line string, and a
--- scalar quoted exactly when the plain form would read back as something
--- else.
+-- Block style, two-space indentation whatever the options say, a flow
+-- form for a collection value that fits `width` and carries nothing flow
+-- cannot spell, a `|` block for a multi-line string, and a scalar quoted
+-- exactly when the plain form would read back as something else.
 
-local YAML_SPELLING = { hex = true, octal = true, leading_zero = true, bare_dot = true, plus = true }
-
-local function spellable(raw, sp)
-  local body = raw
-  local first = at(raw, 0)
-  if first == 43 or first == DASH then
-    if first == 43 and not sp.plus then return false end
-    body = sub(raw, 2)
-  end
-  if body == "" then return false end
-  if not sp.underscores and find(body, "_", 1, true) then return false end
-  if #body >= 2 and at(body, 0) == 48 then
-    local r = sub(body, 2, 2):lower()
-    if r == "x" then return sp.hex == true end
-    if r == "o" then return sp.octal == true end
-    if r == "b" then return sp.binary == true end
-  end
-  if not sp.bare_dot and (at(body, 0) == DOT or at(body, #body - 1) == DOT) then return false end
-  if not sp.leading_zero then
-    local int_end = (find(body, "[%.eE]") or (#body + 1)) - 1
-    if int_end > 1 and at(body, 0) == 48 then return false end
-  end
-  return true
-end
-
-local function canonical_number(raw)
-  local out = {}
-  local s = raw
-  if at(s, 0) == DASH then
-    out[#out + 1] = "-"
-    s = sub(s, 2)
-  elseif at(s, 0) == 43 then
-    s = sub(s, 2)
-  end
-  if #s >= 2 and at(s, 0) == 48 and sub(s, 2, 2):lower():match("[xob]") then
-    local base = ({ x = 16, o = 8, b = 2 })[sub(s, 2, 2):lower()]
-    local digits = sub(s, 3):gsub("_", "")
-    local v = tonumber(digits, base)
-    if v and digits ~= "" and math.type(v) == "integer" then
-      out[#out + 1] = tostring(v)
-    else
-      out[#out + 1] = s
-    end
-    return concat(out)
-  end
-  local e_idx = find(s, "[eE]")
-  local mantissa = e_idx and sub(s, 1, e_idx - 1) or s
-  local exponent = e_idx and sub(s, e_idx) or ""
-  local dot = find(mantissa, ".", 1, true)
-  local int_part = dot and sub(mantissa, 1, dot - 1) or mantissa
-  local int_digits = int_part:gsub("_", ""):gsub("^0+", "")
-  out[#out + 1] = int_digits == "" and "0" or int_digits
-  if dot then
-    local frac = sub(mantissa, dot + 1):gsub("_", "")
-    out[#out + 1] = "." .. (frac == "" and "0" or frac)
-  end
-  out[#out + 1] = (exponent:gsub("_", ""))
-  return concat(out)
-end
-
+-- A number is written as its own lexeme where YAML 1.2 reads that back
+-- as the same number, and in decimal where it does not.
 local function number_text(raw)
-  if spellable(raw, YAML_SPELLING) then return raw end
-  return canonical_number(raw)
+  return N.text(raw, N.YAML_1_2)
 end
 
--- `std.fmt.parseInt(i64|u64, s, 10)` would accept `s`.
-local function zig_parse_int(s)
-  local body = s
-  local c = at(s, 0)
-  local neg = false
-  if c == 43 then body = sub(s, 2) elseif c == DASH then neg = true; body = sub(s, 2) end
-  if #body == 0 then return false end
-  if at(body, 0) == 95 or at(body, #body - 1) == 95 then return false end
-  if not body:match("^[%d_]+$") then return false end
-  local d = body:gsub("_", ""):gsub("^0+", "")
-  if d == "" then return true end
-  local limit = neg and "9223372036854775808" or "18446744073709551615"
-  if #d ~= #limit then return #d < #limit end
-  return d <= limit
+-- Whether the plain form of `s` would read back as a number. The rule is
+-- the compiled printer's, which asks Zig's `parseInt` and `parseFloat`:
+-- they accept `_` separators, so `1_000` and `1__0` are quoted here even
+-- though YAML 1.2 reads neither as a number.
+
+-- A run of `cls` digits with single `_` separators between them, as
+-- Zig's `parseFloat` accepts: `1_000`, never `1__0` or `1_`.
+local function zig_run(s, cls)
+  if s == "" or find(s, "__", 1, true) or at(s, #s - 1) == 95 then return false end
+  return s:match("^[" .. cls .. "][" .. cls .. "_]*$") ~= nil
 end
 
-local function valid_underscores(body, isd)
-  local i = 0
-  local n = #body
-  while i < n do
-    if at(body, i) == 95 then
-      if i == 0 or i + 1 == n then return false end
-      if not isd(at(body, i - 1)) or not isd(at(body, i + 1)) then return false end
-      i = i + 1
-    end
-    i = i + 1
+-- Zig's `parseFloat` over `body`: a mantissa of `cls` digits with an
+-- optional fraction, and an optional `expc` exponent of decimal digits.
+local function zig_float(body, cls, expc)
+  local mantissa, exponent = body:match("^(.-)([" .. expc .. "][-+]?[%d_]*)$")
+  if exponent then
+    if not zig_run((exponent:gsub("^[" .. expc .. "][-+]?", "")), "%d") then return false end
+  else
+    mantissa = body
   end
-  return true
-end
-
--- `std.fmt.parseFloat(f64, s)` would accept `s` (its `inf`/`nan` forms
--- are excluded by the caller).
-local function zig_parse_float(s)
-  local i = 0
-  local c = at(s, 0)
-  if c == 43 or c == DASH then i = 1 end
-  if i >= #s then return false end
-  local rest = sub(s, i + 1)
-  local base, expc, body = 10, 101, rest
-  if #rest >= 2 and at(rest, 0) == 48 and (at(rest, 1) == 120 or at(rest, 1) == 88) then
-    base, expc, body = 16, 112, sub(rest, 3)
-  end
-  local isd = base == 16 and is_hex or is_digit
-  local j, n, ndigits, underscores = 0, #body, 0, 0
-  local function scan_digits()
-    while j < n do
-      local ch = at(body, j)
-      if isd(ch) then
-        j = j + 1
-        ndigits = ndigits + 1
-      elseif ch == 95 then
-        j = j + 1
-        underscores = underscores + 1
-      else
-        break
-      end
-    end
-  end
-  scan_digits()
-  if j < n and at(body, j) == DOT then
-    j = j + 1
-    scan_digits()
-  end
-  if ndigits == 0 then return false end
-  if j < n and (at(body, j) | 0x20) == expc then
-    j = j + 1
-    if j < n and (at(body, j) == 43 or at(body, j) == DASH) then j = j + 1 end
-    if not (j < n and is_digit(at(body, j))) then return false end
-    while j < n do
-      local ch = at(body, j)
-      if is_digit(ch) then
-        j = j + 1
-      elseif ch == 95 then
-        j = j + 1
-        underscores = underscores + 1
-      else
-        break
-      end
-    end
-  end
-  if j ~= n then return false end
-  if underscores > 0 and not valid_underscores(body, isd) then return false end
-  return true
-end
-
-local function contains_ci(hay, needle)
-  return find(hay:lower(), needle, 1, true) ~= nil
+  local int_part, frac = mantissa:match("^([^.]*)%.([^.]*)$")
+  if not int_part then int_part = mantissa end
+  if int_part ~= "" and not zig_run(int_part, cls) then return false end
+  if frac ~= nil and frac ~= "" and not zig_run(frac, cls) then return false end
+  return int_part ~= "" or (frac ~= nil and frac ~= "")
 end
 
 local function looks_numeric(s)
-  if contains_ci(s, "inf") or contains_ci(s, "nan") then return false end
-  return zig_parse_int(s) or zig_parse_float(s)
+  local lower = s:lower()
+  if find(lower, "inf", 1, true) or find(lower, "nan", 1, true) then return false end
+  local body = s:match("^[-+](.*)$") or s
+  -- Zig's `parseInt`, which takes an `_` anywhere but at either end
+  if body:match("^%d$") or body:match("^%d[%d_]*%d$") then return true end
+  local hex = body:match("^0[xX](.*)$")
+  if hex then return zig_float(hex, "%x", "pP") end
+  return zig_float(body, "%d", "eE")
 end
 
 local NON_STRING_KEYWORDS = {
@@ -2760,19 +2499,10 @@ local function leading_anchor(row)
   return row
 end
 
-function Pr:hash_line(text)
-  self:put("#")
-  if #text ~= 0 then self:put(" ", text) end
-end
-
 function Pr:comment_lines(list, depth)
-  for _, c in ipairs(list) do
-    for line in (c.text .. "\n"):gmatch("(.-)\n") do
-      self:indent(depth)
-      self:hash_line((line:gsub("^[ \t]+", ""):gsub("[ \t]+$", "")))
-      self:put("\n")
-    end
-  end
+  local w = fig.writer()
+  w:comments(list, "#", depth)
+  self:put(w:string())
 end
 
 function Pr:leading_comments(row, depth) self:comment_lines(row.leading, depth) end
@@ -2808,19 +2538,31 @@ function Pr:props_after_colon(row)
   if row.tag then self:put(" ", row.tag) end
 end
 
-function Pr:scalar_key(row)
+-- The text a scalar row is written as, or nil when the row is not a
+-- scalar: a number respelled for YAML, a string quoted exactly when its
+-- plain form would read back as something else, an `ext_kind`'s lexeme
+-- as it stands. `flow` quotes a string a flow indicator would cut short.
+function Pr:scalar_word(row, flow)
   local k = row.kind
   if row.ext_kind then
-    if row.ext_kind == "enum_literal" then self:put(scalar_text(row.text)) else self:put(row.text) end
-  elseif k == "string" then
-    self:put(scalar_text(row.text))
-  elseif k == "null" then
-    self:put("null")
-  elseif k == "bool" then
-    self:put(row.text)
-  elseif k == "int" or k == "float" then
-    self:put(number_text(row.text))
-  elseif k == "alias" then
+    if row.ext_kind == "enum_literal" then return scalar_text(row.text) end
+    return row.text
+  end
+  if k == "null" then return "null" end
+  if k == "bool" then return row.text end
+  if k == "int" or k == "float" then return number_text(row.text) end
+  if k == "string" then
+    if flow then return flow_scalar_text(row.text) end
+    return scalar_text(row.text)
+  end
+  return nil
+end
+
+function Pr:scalar_key(row)
+  local w = self:scalar_word(row)
+  if w then
+    self:put(w)
+  elseif row.kind == "alias" then
     self:put("*", row.text, " ")
   end
 end
@@ -2867,14 +2609,9 @@ end
 
 function Pr:flow(row)
   local k = row.kind
-  if k == "null" then
-    self:put("null")
-  elseif k == "bool" then
-    self:put(row.text)
-  elseif k == "int" or k == "float" then
-    self:put(number_text(row.text))
-  elseif k == "string" then
-    self:put(flow_scalar_text(row.text))
+  local w = self:scalar_word(row, true)
+  if w then
+    self:put(w)
   elseif k == "sequence" then
     if #row.items == 0 then
       self:put("[]")
@@ -2894,11 +2631,7 @@ function Pr:flow(row)
     self:put("{ ")
     for i, kv in ipairs(row.items) do
       if i > 1 then self:put(", ") end
-      if kv.key.kind == "string" then
-        self:put(flow_scalar_text(kv.key.text))
-      else
-        self:scalar_key(kv.key)
-      end
+      self:put(self:scalar_word(kv.key, true))
       self:put(": ")
       self:flow(kv.value)
     end
@@ -2914,16 +2647,9 @@ end
 function Pr:inline_value(row)
   self:props(row)
   local k = row.kind
-  if row.ext_kind then
-    if row.ext_kind == "enum_literal" then self:put(scalar_text(row.text)) else self:put(row.text) end
-  elseif k == "null" then
-    self:put("null")
-  elseif k == "bool" then
-    self:put(row.text)
-  elseif k == "int" or k == "float" then
-    self:put(number_text(row.text))
-  elseif k == "string" then
-    self:put(scalar_text(row.text))
+  local w = self:scalar_word(row)
+  if w then
+    self:put(w)
   elseif k == "sequence" then
     self:put(#row.items == 0 and "[]" or "[...]")
   elseif k == "mapping" then
@@ -3097,17 +2823,9 @@ end
 
 function Pr:node(row, depth)
   local k = row.kind
-  if row.ext_kind then
-    if row.ext_kind == "enum_literal" then self:put(scalar_text(row.text)) else self:put(row.text) end
-    self:put("\n")
-  elseif k == "null" then
-    self:put("null\n")
-  elseif k == "bool" then
-    self:put(row.text, "\n")
-  elseif k == "int" or k == "float" then
-    self:put(number_text(row.text), "\n")
-  elseif k == "string" then
-    self:put(scalar_text(row.text), "\n")
+  local w = self:scalar_word(row)
+  if w then
+    self:put(w, "\n")
   elseif k == "sequence" then
     self:sequence(row, depth)
   elseif k == "mapping" then
