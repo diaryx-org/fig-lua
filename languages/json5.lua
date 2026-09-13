@@ -1,20 +1,16 @@
 -- JSONC and JSON5, in Lua: the twins of fig's compiled `jsonc` and `json5`
 -- dialects — one script, two dialects, as the compiled JSON module is one
--- parser with a dialect switch — row for row.
+-- parser with a dialect switch.
 --
--- `fig lang check lua-jsonc --against jsonc <files…>` and `fig lang check
--- lua-json5 --against json5 <files…>` hold this script to the compiled
--- parser's node table on every file given, and this script is written
--- against `fig lang table -i jsonc` / `-i json5`, which print that table.
--- What the compiled dialects accept is stated in fig's
--- `src/languages/json/` (`tokenizer.zig`, `parser.zig`, `printer.zig`),
--- and this follows them function for function: the tokenizer runs over
--- the whole file first, then a state machine over its tokens. Strict JSON
--- is `json.lua`, written as a grammar; this is the compiled shape,
--- because the comments are what make these dialects, and the compiled
--- parser binds them by looking at the tokens around each one.
+-- The contract is the format and the tree, not the compiled parser's
+-- shape: this script's node table is held row for row against the compiled
+-- dialects' on every fixture under `tests/fixtures/jsonc/` and
+-- `tests/fixtures/json5/` — every row, span, text and comment — and every
+-- document the compiled dialects refuse this refuses too, in words and at
+-- offsets of its own. `fig lang table -i jsonc` / `-i json5` prints the
+-- table a document must give.
 --
--- The shape, as the compiled parser builds it:
+-- The format:
 --
 --   * JSONC is JSON with `//` and `/* */` comments; JSON5 adds unquoted
 --     `identifier` keys (and `true`/`false`/`null` as keys), single-quoted
@@ -24,21 +20,29 @@
 --     integers, `.5`, `5.`, `+1`, and `\v`/`\f` as whitespace;
 --   * a container spans its brackets, an entry its key through its value;
 --     a number keeps its lexeme and is a float when it has a `.` or an
---     exponent (a `0x` integer never); a duplicate key keeps both
---     entries;
+--     exponent (a `0x` integer never); a duplicate key keeps both entries;
 --   * a comment that is the last thing on the line of the value just
---     finished trails it — or dangles on a container whose closing line
---     it is; one right after a `[` or `{` that ends its line trails the
---     container; any other waits and leads the next key, value or
---     container, or dangles on the container that closes with it still
---     waiting; what waits after the document is dropped. A comment's
---     text is trimmed; a block comment's style is `block`.
+--     finished trails it — or dangles on a container whose closing line it
+--     is; one on the line a container opens, with nothing else after it,
+--     is that container's trailing comment; any other waits and leads the
+--     next key, value or container, or dangles on the container that
+--     closes with it still waiting; what waits after the document is
+--     dropped. A comment's text is trimmed; a block comment's style is
+--     `block`.
 --
--- The refusals are the compiled parser's, in its words and at its
--- offsets: a tokenizer error where its cursor stopped, a parser error at
--- the start of the token it was dispatching (the document's end, for a
--- document that ended early). Nearly everything is `UnexpectedToken`, as
--- in strict JSON.
+-- That is the grammar module's own binding with `ends_line`, `one` and
+-- `closing_line` set, and two things it cannot express: a container claims
+-- what waits and what rides its opening line before it exists, which the
+-- `opener`/`container` pair below does; and "the last thing on its line"
+-- counts a following `,` or closer as nothing, so `[1 /* one */, 2]`
+-- trails `1`, which `ends_line` below widens the context's
+-- `rest_is_blank` to say.
+--
+-- Spans are byte offsets, 0-based, `[start, end)`; a container's span
+-- includes its brackets and a string's its quotes.
+
+local G = require("fig.grammar")
+local N = require("fig.number")
 
 local M = {}
 
@@ -66,277 +70,75 @@ M.samples = {
 }
 M.renderers = {}
 
--- ── errors, as the compiled parser words them ─────────────────────────────
+-- ── errors ────────────────────────────────────────────────────────────────
 
 local MESSAGES = {
-  UnexpectedToken = "unexpected token here; check for a missing comma, colon, key, or closing bracket/brace",
-  UnexpectedEndOfInput = "the document ended before this value/token was complete",
-  UnclosedString = "unclosed string; a JSON string cannot span multiple lines — add the closing quote, or escape the newline as `\\n`",
-  LeadingZero = "a number cannot have a leading zero; write the digits without the padding, or quote it as a string to keep the padding (e.g. a zip code)",
-  UnexpectedSlash = "a `/` here must start a `//` or `/* */` comment, and strict JSON has no comments at all — use a .jsonc/.json5 file, or remove it",
-  UnclosedComment = "unclosed block comment; add the closing `*/`",
-  InvalidUnicodeEscape = "invalid `\\u` escape; it needs exactly 4 hex digits (e.g. `\\u00e9`)",
+  value = "expected a value here: an object, an array, a string, a number, `true`, `false` or `null`",
+  entry = "expected a `key: value` entry or `}` here",
+  item = "expected a value or `]` here",
+  colon = "expected `:` after this key",
+  comma = "expected `,` between elements",
+  trailing_comma = "a trailing comma is not allowed here; JSONC follows strict JSON — drop it, or use a .json5 file",
+  unclosed_object = "unclosed object; expected `}` before the end of the input",
+  unclosed_array = "unclosed array; expected `]` before the end of the input",
+  unclosed_string = "unclosed string; add the closing quote, or escape the line ending as `\\n`",
+  unclosed_comment = "unclosed block comment; add the closing `*/`",
+  control = "a raw control character cannot stand inside a string; escape it (`\\n`, `\\t`, `\\u0000`)",
+  leading_zero = "a number cannot have a leading zero; write the digits without the padding, or quote it as a string to keep the padding (e.g. a zip code)",
+  digits = "expected the digits of a number here",
+  hex_digits = "expected hex digits after `0x`",
+  exponent = "expected the digits of the exponent here",
+  bad_u = "invalid `\\u` escape; it needs exactly 4 hex digits (e.g. `\\u00e9`)",
+  bad_x = "invalid `\\x` escape; it needs exactly 2 hex digits (e.g. `\\x41`)",
+  empty = "no document here; expected a value",
+  trailing = "unexpected content after the document; a JSON document is one value",
 }
 
--- ── the tokenizer ─────────────────────────────────────────────────────────
--- Tokens are `{ kind=, s=, e= }` over 0-based byte offsets. A failure is
--- reported where the compiled tokenizer's cursor stopped.
-
-local function is_digit(b) return b ~= nil and b >= 48 and b <= 57 end
-local function is_hex(b) return b ~= nil and (is_digit(b) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102)) end
-local function is_ident_start(b)
-  return b ~= nil and ((b >= 97 and b <= 122) or (b >= 65 and b <= 90) or b == 95 or b == 36)
+local function bad_escape(e)
+  return "invalid escape `\\" .. e .. "` in a string; JSON reads `\\\" \\\\ \\/ \\b \\f \\n \\r \\t \\uXXXX`"
 end
-local function is_ident_part(b) return is_ident_start(b) or is_digit(b) end
--- `std.ascii.isWhitespace`: space, tab, newline, return, vertical tab, form feed.
-local function is_space(b) return b == 32 or b == 9 or b == 10 or b == 13 or b == 11 or b == 12 end
 
-local function tokenize(src, json5)
-  local n = #src
-  local i = 0
-  local tokens = {}
-  local function at(k) return src:byte(k + 1) end
-  local function fail(message) fig.fail(message, i) end
-  local function emit(kind, s, e)
-    tokens[#tokens + 1] = { kind = kind, s = s, e = e }
-    i = e
-  end
-  local function matches(word) return src:sub(i + 1, i + #word) == word end
+local function not_a_value(w)
+  return "`" .. w .. "` is not a value; quote it to mean the string"
+end
 
-  local function literal(word, kind)
-    if not matches(word) then fail(MESSAGES.UnexpectedToken) end
-    emit(kind, i, i + #word)
-  end
+-- ── lexical ───────────────────────────────────────────────────────────────
 
-  local function whitespace()
-    local s = i
-    while i < n and is_space(at(i)) do i = i + 1 end
-    emit("whitespace", s, i)
-  end
+local IDENT = "[%a_$][%w_$]*"
+local SIMPLE_ESCAPES = { ['"'] = 34, ["\\"] = 92, ["/"] = 47, b = 8, f = 12, n = 10, r = 13, t = 9 }
 
-  local function identifier_or_keyword()
-    local s = i
-    while i < n and is_ident_part(at(i)) do i = i + 1 end
-    local word = src:sub(s + 1, i)
-    local kind = "identifier"
-    if word == "true" then kind = "true_" elseif word == "false" then kind = "false_" elseif word == "null" then kind = "null_" end
-    emit(kind, s, i)
-  end
+local function is_digit(c) return c ~= nil and c >= 48 and c <= 57 end
 
-  local function string_token(delimiter)
-    local s = i
+local comment = G.choice({
+  G.comment("//"),
+  G.comment({ open = "/*", close = "*/", unclosed = MESSAGES.unclosed_comment }),
+})
+
+-- Whether nothing but a `,` or a closer stands between `at` and the end of
+-- the line: what these dialects count as the end of a line, so that a
+-- comment before a comma still trails what the comma follows.
+local function ends_line(sc, at)
+  local src = sc.src
+  local i = at + 1
+  while i <= #src do
+    local b = src:byte(i)
+    if b ~= 32 and b ~= 9 then
+      return b == 10 or b == 13 or b == 44 or b == 93 or b == 125
+    end
     i = i + 1
-    while i < n do
-      local c = at(i)
-      if c == delimiter then
-        i = i + 1
-        emit("string", s, i)
-        return
-      end
-      if c == 92 then
-        i = i + 1
-        local escaped = at(i)
-        if escaped == nil then fail(MESSAGES.UnclosedString) end
-        if json5 then
-          -- Any escape is consumed here and judged by the parser; a `\'`
-          -- or a `\<newline>` must not end the string.
-          i = i + 1
-          if escaped == 13 and at(i) == 10 then i = i + 1 end
-        elseif escaped == 34 or escaped == 92 or escaped == 47 or escaped == 98 or escaped == 102
-          or escaped == 110 or escaped == 114 or escaped == 116 then
-          i = i + 1
-        elseif escaped == 117 then
-          i = i + 1
-          for _ = 1, 4 do
-            local h = at(i)
-            if h == nil then fail(MESSAGES.UnclosedString) end
-            if not is_hex(h) then fail(MESSAGES.UnexpectedToken) end
-            i = i + 1
-          end
-        else
-          fail(MESSAGES.UnexpectedToken)
-        end
-      elseif c < 32 then
-        fail(MESSAGES.UnexpectedToken)
-      else
-        i = i + 1
-      end
-    end
-    fail(MESSAGES.UnclosedString)
   end
-
-  local function digits()
-    while i < n and is_digit(at(i)) do i = i + 1 end
-  end
-
-  local function number_json()
-    local s = i
-    if at(i) == 45 then i = i + 1 end
-    local c = at(i)
-    if c == nil then fail(MESSAGES.UnexpectedEndOfInput) end
-    if c == 48 then
-      i = i + 1
-      if is_digit(at(i)) then fail(MESSAGES.LeadingZero) end
-    elseif c >= 49 and c <= 57 then
-      i = i + 1
-      digits()
-    else
-      fail(MESSAGES.UnexpectedToken)
-    end
-    if at(i) == 46 then
-      i = i + 1
-      local f = at(i)
-      if f == nil then fail(MESSAGES.UnexpectedEndOfInput) end
-      if not is_digit(f) then fail(MESSAGES.UnexpectedToken) end
-      digits()
-    end
-    local e = at(i)
-    if e == 101 or e == 69 then
-      i = i + 1
-      local sign = at(i)
-      if sign == 43 or sign == 45 then i = i + 1 end
-      local x = at(i)
-      if x == nil then fail(MESSAGES.UnexpectedEndOfInput) end
-      if not is_digit(x) then fail(MESSAGES.UnexpectedToken) end
-      digits()
-    end
-    emit("number", s, i)
-  end
-
-  -- An ES5 numeric literal: a sign, then `Infinity`, `NaN`, a `0x` integer,
-  -- or a decimal with a leading or trailing point and an exponent. A
-  -- leading zero before a digit stays refused.
-  local function number_json5()
-    local s = i
-    if at(i) == 43 or at(i) == 45 then i = i + 1 end
-    if matches("Infinity") then
-      emit("number", s, i + 8)
-      return
-    end
-    if matches("NaN") then
-      emit("number", s, i + 3)
-      return
-    end
-    if at(i) == 48 and (at(i + 1) == 120 or at(i + 1) == 88) then
-      i = i + 2
-      local hs = i
-      while i < n and is_hex(at(i)) do i = i + 1 end
-      if i == hs then fail(MESSAGES.UnexpectedToken) end
-      emit("number", s, i)
-      return
-    end
-    local seen = false
-    if at(i) == 48 then
-      i = i + 1
-      seen = true
-      if is_digit(at(i)) then fail(MESSAGES.LeadingZero) end
-    else
-      while i < n and is_digit(at(i)) do
-        i = i + 1
-        seen = true
-      end
-    end
-    if at(i) == 46 then
-      i = i + 1
-      while i < n and is_digit(at(i)) do
-        i = i + 1
-        seen = true
-      end
-    end
-    if not seen then fail(MESSAGES.UnexpectedToken) end
-    local e = at(i)
-    if e == 101 or e == 69 then
-      i = i + 1
-      local sign = at(i)
-      if sign == 43 or sign == 45 then i = i + 1 end
-      local xs = i
-      digits()
-      if i == xs then fail(MESSAGES.UnexpectedEndOfInput) end
-    end
-    emit("number", s, i)
-  end
-
-  local function comment()
-    if i + 1 >= n then fail(MESSAGES.UnexpectedSlash) end
-    local s = i
-    local second = at(i + 1)
-    if second == 47 then
-      i = i + 2
-      while i < n and at(i) ~= 10 and at(i) ~= 13 do i = i + 1 end
-      emit("comment", s, i)
-    elseif second == 42 then
-      i = i + 2
-      while i + 1 < n do
-        if at(i) == 42 and at(i + 1) == 47 then
-          i = i + 2
-          emit("comment", s, i)
-          return
-        end
-        i = i + 1
-      end
-      fail(MESSAGES.UnclosedComment)
-    else
-      fail(MESSAGES.UnexpectedSlash)
-    end
-  end
-
-  if src:sub(1, 3) == "\239\187\191" then i = 3 end
-  while i < n do
-    local c = at(i)
-    if json5 and is_ident_start(c) then
-      identifier_or_keyword()
-    elseif json5 and c == 39 then
-      string_token(39)
-    elseif json5 and (c == 43 or c == 46) then
-      number_json5()
-    elseif json5 and (c == 11 or c == 12) then
-      whitespace()
-    elseif c == 123 then
-      emit("open_brace", i, i + 1)
-    elseif c == 125 then
-      emit("close_brace", i, i + 1)
-    elseif c == 91 then
-      emit("open_bracket", i, i + 1)
-    elseif c == 93 then
-      emit("close_bracket", i, i + 1)
-    elseif c == 58 then
-      emit("colon", i, i + 1)
-    elseif c == 44 then
-      emit("comma", i, i + 1)
-    elseif c == 116 then
-      literal("true", "true_")
-    elseif c == 102 then
-      literal("false", "false_")
-    elseif c == 110 then
-      literal("null", "null_")
-    elseif c == 34 then
-      string_token(34)
-    elseif c == 47 then
-      comment()
-    elseif is_digit(c) or c == 45 then
-      if json5 then number_json5() else number_json() end
-    elseif c == 32 or c == 9 or c == 10 or c == 13 then
-      whitespace()
-    else
-      fail(MESSAGES.UnexpectedToken)
-    end
-  end
-  emit("end_of_file", n, n)
-  return tokens
+  return true
 end
 
--- ── decoding ──────────────────────────────────────────────────────────────
+-- ── strings ───────────────────────────────────────────────────────────────
 
-local SIMPLE_ESCAPES = { ['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b", f = "\f", n = "\n", r = "\r", t = "\t" }
-
--- The text of a string token, quotes included. Returns the text, or nil
--- and the message the compiled parser refuses it with.
-local function decode_string(slice, json5)
-  local quote = slice:sub(1, 1)
-  local valid_quote = quote == '"' or (json5 and quote == "'")
-  if #slice < 2 or not valid_quote or slice:sub(-1) ~= quote then return nil, "UnclosedString" end
-  local inner = slice:sub(2, -2)
+-- The text of a string's inside. Decoded by hand rather than with
+-- `G.quoted`, because `\u` is not a fixed replacement: a surrogate pair is
+-- one character, and a lone surrogate is no character at all — the string
+-- is then kept as written, every escape in it undecoded.
+local function decode(sc, inner, json5, at)
   if not inner:find("\\", 1, true) then return inner end
+  local function fail(message) sc:fail(message, at) end
   local out = {}
   local i = 1
   local n = #inner
@@ -346,329 +148,291 @@ local function decode_string(slice, json5)
       out[#out + 1] = c
       i = i + 1
     else
-      i = i + 1
-      if i > n then return nil, "UnclosedString" end
-      local e = inner:sub(i, i)
+      local e = inner:sub(i + 1, i + 1)
+      i = i + 2
       if SIMPLE_ESCAPES[e] then
-        out[#out + 1] = SIMPLE_ESCAPES[e]
-      elseif e == "'" then
-        if not json5 then return nil, "UnexpectedToken" end
-        out[#out + 1] = "'"
-      elseif e == "v" then
-        if not json5 then return nil, "UnexpectedToken" end
-        out[#out + 1] = "\11"
-      elseif e == "0" then
-        if not json5 then return nil, "UnexpectedToken" end
-        out[#out + 1] = "\0"
-      elseif e == "x" then
-        if not json5 then return nil, "UnexpectedToken" end
-        if i + 2 > n then return nil, "UnclosedString" end
-        local hex = inner:sub(i + 1, i + 2)
-        if not hex:match("^%x%x$") then return nil, "InvalidUnicodeEscape" end
-        out[#out + 1] = utf8.char(tonumber(hex, 16))
-        i = i + 2
-      elseif e == "\n" then
-        if not json5 then return nil, "UnexpectedToken" end
-      elseif e == "\r" then
-        if not json5 then return nil, "UnexpectedToken" end
-        if inner:sub(i + 1, i + 1) == "\n" then i = i + 1 end
+        out[#out + 1] = string.char(SIMPLE_ESCAPES[e])
       elseif e == "u" then
-        -- One UTF-16 unit in four hex digits; a surrogate pair joins;
-        -- an unpaired surrogate keeps the whole string as written.
-        if i + 4 > n then return nil, "UnclosedString" end
-        local hex = inner:sub(i + 1, i + 4)
-        if not hex:match("^%x%x%x%x$") then return nil, "InvalidUnicodeEscape" end
+        local hex = inner:sub(i, i + 3)
+        if not hex:match("^%x%x%x%x$") then fail(MESSAGES.bad_u) end
         local cp = tonumber(hex, 16)
         i = i + 4
-        if cp >= 0xD800 and cp <= 0xDBFF then
-          if i + 6 > n then return inner end
-          if inner:sub(i + 1, i + 2) ~= "\\u" then return inner end
-          local lo = inner:sub(i + 3, i + 6)
-          if not lo:match("^%x%x%x%x$") then return nil, "InvalidUnicodeEscape" end
-          local lcp = tonumber(lo, 16)
-          if not (lcp >= 0xDC00 and lcp <= 0xDFFF) then return inner end
-          cp = 0x10000 + ((cp - 0xD800) << 10) + (lcp - 0xDC00)
+        if fig.is_surrogate(cp) then
+          local pair = nil
+          if inner:sub(i, i + 1) == "\\u" then
+            local lo = inner:sub(i + 2, i + 5)
+            if not lo:match("^%x%x%x%x$") then fail(MESSAGES.bad_u) end
+            pair = fig.surrogate_pair(cp, tonumber(lo, 16))
+          end
+          if pair == nil then return inner end
+          cp = pair
           i = i + 6
-        elseif cp >= 0xDC00 and cp <= 0xDFFF then
-          return inner
         end
         out[#out + 1] = utf8.char(cp)
+      elseif not json5 or e == "" then
+        fail(bad_escape(e))
+      elseif e == "x" then
+        local hex = inner:sub(i, i + 1)
+        if not hex:match("^%x%x$") then fail(MESSAGES.bad_x) end
+        out[#out + 1] = utf8.char(tonumber(hex, 16))
+        i = i + 2
+      elseif e == "v" then
+        out[#out + 1] = "\11"
+      elseif e == "0" then
+        out[#out + 1] = "\0"
+      elseif e == "\n" then
+        -- A `\` before a line ending is a continuation: neither is in the text.
+      elseif e == "\r" then
+        if inner:sub(i, i) == "\n" then i = i + 1 end
       else
-        if not json5 then return nil, "UnexpectedToken" end
         out[#out + 1] = e
       end
-      i = i + 1
     end
   end
   return table.concat(out)
 end
 
--- `Infinity`/`NaN`, optionally signed: a `number_special`, or nil.
-local function special_number(raw)
-  local body = raw
-  local first = raw:sub(1, 1)
-  if first == "+" or first == "-" then body = raw:sub(2) end
-  if body == "Infinity" or body == "NaN" then return true end
-  return false
+-- A string: `"…"`, and in JSON5 `'…'`. A raw control character inside, a
+-- line ending among them, is a refusal rather than a byte.
+local function string_rule(json5)
+  return function(sc)
+    local s = sc.pos
+    local q = sc:byte()
+    if not (q == 34 or (json5 and q == 39)) then return nil end
+    local src, n = sc.src, sc.n
+    local i = s + 1
+    while true do
+      if i >= n then sc:fail(MESSAGES.unclosed_string, s) end
+      local c = src:byte(i + 1)
+      if c == q then
+        i = i + 1
+        break
+      elseif c == 92 then
+        if i + 1 >= n then sc:fail(MESSAGES.unclosed_string, s) end
+        if src:byte(i + 2) == 13 and src:byte(i + 3) == 10 then i = i + 3 else i = i + 2 end
+      elseif c < 32 then
+        sc:fail(MESSAGES.control, i)
+      else
+        i = i + 1
+      end
+    end
+    sc.pos = i
+    return fig.scalar("string", { s, i }, decode(sc, sc:slice(s + 1, i - 1), json5, s))
+  end
 end
 
+-- ── numbers and words ─────────────────────────────────────────────────────
+
+-- The kind a lexeme implies: a float when it has a `.` or an exponent, an
+-- int otherwise — a `0x` integer never, whatever its digits look like.
 local function number_kind(raw)
-  local body = raw
-  local first = raw:sub(1, 1)
-  if first == "+" or first == "-" then body = raw:sub(2) end
-  if body:match("^0[xX]") then return "int" end
-  if raw:find(".", 1, true) then return "float" end
-  if raw:find("[eE]") then return "float" end
-  return "int"
+  if raw:match("^[+-]?0[xX]") then return "int" end
+  return raw:find("[%.eE]") and "float" or "int"
 end
 
--- ── the parser ────────────────────────────────────────────────────────────
--- The compiled state machine over the tokens; comments are bound as the
--- token loop meets them, by what stands around them.
-
-local P = {}
-P.__index = P
-
-function P:fail(message, token) fig.fail(MESSAGES[message] or message, token.s) end
-
-function P:text(t) return self.src:sub(t.s + 1, t.e) end
-
-function P:claim_leading(node)
-  if #self.pending == 0 then return end
-  for _, c in ipairs(self.pending) do node:comment("leading", c.text, c.style) end
-  self.pending = {}
-end
-
-function P:add_node(node)
-  self:claim_leading(node)
-  return node
-end
-
-function P:scalar_node(token)
-  local raw = self:text(token)
-  local k = token.kind
-  if k == "null_" then return self:add_node(fig.scalar("null", { token.s, token.e })) end
-  if k == "true_" or k == "false_" then return self:add_node(fig.scalar("bool", { token.s, token.e }, raw)) end
-  if k == "string" then
-    local text, err = decode_string(raw, self.json5)
-    if text == nil then self:fail(err, token) end
-    return self:add_node(fig.scalar("string", { token.s, token.e }, text))
-  end
-  if k == "number" or k == "identifier" then
-    if special_number(raw) then
-      return self:add_node(fig.scalar("string", { token.s, token.e }, raw, { ext_kind = "number_special" }))
+-- A number, the lexeme kept verbatim as the row's text: JSON's
+-- `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`, and for JSON5 an
+-- ES5.1 numeric literal — a `+` too, `Infinity` and `NaN` (no number the
+-- wire can hold, so they ride as `number_special` strings), a `0x`
+-- integer, and either side of the point left out.
+local function number_rule(json5)
+  return function(sc)
+    local s = sc.pos
+    local c = sc:byte()
+    -- `I` and `N` open `Infinity` and `NaN`; any other word the rule meets
+    -- it hands back, for `word` below to judge.
+    if not (is_digit(c) or c == 45 or (json5 and (c == 43 or c == 46 or c == 73 or c == 78))) then return nil end
+    if c == 45 or c == 43 then
+      sc:advance()
+      c = sc:byte()
     end
-    if k == "identifier" then self:fail("UnexpectedToken", token) end
-    return self:add_node(fig.scalar(number_kind(raw), { token.s, token.e }, raw))
-  end
-  self:fail("UnexpectedToken", token)
-end
-
-function P:open(kind, token)
-  local node = kind == "object" and fig.mapping({ token.s, token.e }, { duplicates = "keep" }) or fig.sequence({ token.s, token.e })
-  self:add_node(node)
-  self.stack[#self.stack + 1] = { kind = kind, node = node, pending_key = nil }
-  self.state = kind == "object" and "ExpectObjectKeyOrEnd" or "ExpectArrayValueOrEnd"
-end
-
-function P:close(token)
-  if #self.stack == 0 then self:fail("UnexpectedToken", token) end
-  local frame = table.remove(self.stack)
-  frame.node.span[2] = token.e
-  if #self.pending > 0 then
-    for _, c in ipairs(self.pending) do frame.node:comment("dangling", c.text, c.style) end
-    self.pending = {}
-  end
-  return frame.node
-end
-
-function P:begin_key(token)
-  if token.kind ~= "string" and not self.json5 then self:fail("UnexpectedToken", token) end
-  local text
-  if token.kind == "string" then
-    local err
-    text, err = decode_string(self:text(token), self.json5)
-    if text == nil then self:fail(err, token) end
-  else
-    text = self:text(token)
-  end
-  local key = self:add_node(fig.scalar("string", { token.s, token.e }, text))
-  self.stack[#self.stack].pending_key = key
-  self.state = "ExpectObjectColon"
-end
-
-function P:finish_value(value, token)
-  self.last_value = value
-  if #self.stack == 0 then
-    self.root = value
-    self.state = "ExpectEndOfFile"
-    return
-  end
-  local frame = self.stack[#self.stack]
-  if frame.kind == "array" then
-    frame.node:add(value)
-    self.state = "ExpectArrayCommaOrEnd"
-  else
-    local key = frame.pending_key
-    if key == nil then self:fail("UnexpectedToken", token) end
-    frame.pending_key = nil
-    frame.node:put(fig.entry(key, value, { key.span[1], value.span[2] }))
-    self.state = "ExpectObjectCommaOrEnd"
-  end
-end
-
-local function is_value_token(kind)
-  return kind == "null_" or kind == "true_" or kind == "false_" or kind == "string" or kind == "number" or kind == "identifier"
-end
-
-function P:value(token)
-  local k = token.kind
-  if k == "open_brace" then
-    self:open("object", token)
-  elseif k == "open_bracket" then
-    self:open("array", token)
-  elseif is_value_token(k) then
-    self:finish_value(self:scalar_node(token), token)
-  else
-    self:fail("UnexpectedToken", token)
-  end
-end
-
-local function is_key_token(kind)
-  return kind == "string" or kind == "identifier" or kind == "true_" or kind == "false_" or kind == "null_"
-end
-
-function P:dispatch(token)
-  local state = self.state
-  local k = token.kind
-  if state == "ExpectValue" or state == "ExpectObjectValue" then
-    self:value(token)
-  elseif state == "ExpectArrayValueOrEnd" then
-    if k == "close_bracket" then self:finish_value(self:close(token), token) else self:value(token) end
-  elseif state == "ExpectArrayCommaOrEnd" then
-    if k == "close_bracket" then
-      self:finish_value(self:close(token), token)
-    elseif k == "comma" then
-      self.state = self.json5 and "ExpectArrayValueOrEnd" or "ExpectValue"
+    if json5 then
+      local ms, me = sc:match("Infinity")
+      if ms == nil then ms, me = sc:match("NaN") end
+      if ms ~= nil and sc.src:sub(me + 1, me + 1):match("[%w_$]") == nil then
+        return fig.scalar("string", { s, me }, sc:slice(s, me), { ext_kind = "number_special" })
+      end
+      if not (is_digit(c) or c == 46) then
+        sc.pos = s
+        return nil
+      end
+    end
+    if json5 and sc:match("0[xX]") then
+      if not sc:match("%x+") then sc:fail(MESSAGES.hex_digits) end
     else
-      self:fail("UnexpectedToken", token)
+      local ds = sc.pos
+      local seen = sc:match("%d+") ~= nil
+      if seen and sc.src:byte(ds + 1) == 48 and sc.pos > ds + 1 then sc:fail(MESSAGES.leading_zero, ds) end
+      if not json5 and not seen then sc:fail(MESSAGES.digits) end
+      if sc:byte() == 46 then
+        sc:advance()
+        local frac = sc:match("%d+") ~= nil
+        if not json5 and not frac then sc:fail(MESSAGES.digits) end
+        seen = seen or frac
+      end
+      if not seen then sc:fail(MESSAGES.digits, s) end
+      local e = sc:byte()
+      if e == 101 or e == 69 then
+        sc:advance()
+        local sign = sc:byte()
+        if sign == 43 or sign == 45 then sc:advance() end
+        if not sc:match("%d+") then sc:fail(MESSAGES.exponent) end
+      end
     end
-  elseif state == "ExpectObjectKeyOrEnd" then
-    if is_key_token(k) then
-      self:begin_key(token)
-    elseif k == "close_brace" then
-      self:finish_value(self:close(token), token)
-    else
-      self:fail("UnexpectedToken", token)
-    end
-  elseif state == "ExpectObjectKey" then
-    if is_key_token(k) then self:begin_key(token) else self:fail("UnexpectedToken", token) end
-  elseif state == "ExpectObjectColon" then
-    if k == "colon" then self.state = "ExpectObjectValue" else self:fail("UnexpectedToken", token) end
-  elseif state == "ExpectObjectCommaOrEnd" then
-    if k == "close_brace" then
-      self:finish_value(self:close(token), token)
-    elseif k == "comma" then
-      self.state = self.json5 and "ExpectObjectKeyOrEnd" or "ExpectObjectKey"
-    else
-      self:fail("UnexpectedToken", token)
-    end
-  elseif state == "ExpectEndOfFile" then
-    if k ~= "end_of_file" then self:fail("UnexpectedToken", token) end
+    local raw = sc:slice(s, sc.pos)
+    return fig.scalar(number_kind(raw), { s, sc.pos }, raw)
   end
 end
 
--- Whether the comment at `i` is the last content on its line: what follows
--- is a newline, a comma, a closer or the end. A value, a key or another
--- comment first on the same line means this one leads that instead.
-function P:ends_line(i)
-  local tokens = self.tokens
-  for j = i + 1, #tokens do
-    local t = tokens[j]
-    if t.kind == "whitespace" then
-      if self.src:sub(t.s + 1, t.e):find("\n", 1, true) then return true end
-    elseif t.kind == "comma" or t.kind == "close_brace" or t.kind == "close_bracket" or t.kind == "end_of_file" then
-      return true
-    else
-      return false
+-- `null`, `true`, `false`, whole words; any other word is a value only
+-- once it is quoted. (In JSON5 `Infinity` and `NaN` are numbers, and the
+-- number rule has taken them before this one is tried.)
+local function word(sc)
+  local s, e = sc:match(IDENT)
+  if s == nil then return nil end
+  local w = sc:slice(s, e)
+  if w == "null" then return fig.scalar("null", { s, e }, nil) end
+  if w == "true" or w == "false" then return fig.scalar("bool", { s, e }, w) end
+  sc:fail(not_a_value(w), s)
+end
+
+-- ── the dialect ───────────────────────────────────────────────────────────
+-- One set of rules per dialect: the containers are `G.map` and
+-- `G.sequence`, with the opener, the separator and the key and value rules
+-- doing what this binding asks that the module's defaults do not.
+
+local function build(json5)
+  local string_value = string_rule(json5)
+  local number = number_rule(json5)
+  local trivia = G.trivia({ space = G.pat(json5 and "[ \t\r\n\v\f]+" or "[ \t\r\n]+"), comment = comment })
+
+  local value
+
+  -- A container's opener: the delimiter, and — when nothing before it can
+  -- claim it — a comment on its line that ends the line, which the
+  -- container takes as its trailing comment once it exists. What was
+  -- waiting when it opened is its leading comments. Both ride a stack,
+  -- because containers nest, and neither can go through the context: the
+  -- node does not exist until the container closes.
+  local function opener(delim)
+    return function(sc, ctx)
+      local s = sc.pos
+      if not sc:lit(delim) then return nil end
+      local head = { leading = ctx.pending }
+      ctx.pending = {}
+      local p = sc.pos
+      G.hs(sc)
+      local at = sc.pos
+      local c = comment(sc)
+      local claimed = ctx.last ~= nil and sc:same_line(ctx.last.span[2], at)
+      if c ~= nil and not claimed and ends_line(sc, c[2]) then head.trailing = c else sc.pos = p end
+      ctx.heads[#ctx.heads + 1] = head
+      return { s, sc.pos }
     end
   end
-  return true
-end
 
--- Whether the last significant token before `i`, on the same line, is a
--- `[` or `{`: a comment riding the line a container opened on.
-function P:after_open_delimiter(i)
-  local tokens = self.tokens
-  for j = i - 1, 1, -1 do
-    local t = tokens[j]
-    if t.kind == "whitespace" then
-      if self.src:sub(t.s + 1, t.e):find("\n", 1, true) then return false end
-    elseif t.kind == "open_bracket" or t.kind == "open_brace" then
-      return true
-    else
-      return false
+  local function container(rule)
+    return function(sc, ctx)
+      local n = rule(sc, ctx)
+      if n == nil then return nil end
+      local head = table.remove(ctx.heads)
+      for _, c in ipairs(head.leading) do n:comment("leading", c.text, c.style) end
+      if head.trailing then n:comment("trailing", head.trailing.text, head.trailing.style) end
+      return n
     end
   end
-  return false
-end
 
--- Whether `node` is a container whose opener is on an earlier line than
--- `at`: a multi-line container whose close is on the comment's line.
-function P:multiline_container(node, at)
-  if node.kind ~= "mapping" and node.kind ~= "sequence" then return false end
-  local open = node.span[1]
-  if at <= open then return false end
-  return self.src:sub(open + 1, at):find("\n", 1, true) ~= nil
-end
-
-function P:handle_comment(i)
-  local token = self.tokens[i]
-  local raw = self:text(token)
-  local c
-  if raw:sub(2, 2) == "*" then
-    c = { text = raw:sub(3, -3):match("^[ \t\r\n]*(.-)[ \t\r\n]*$"), style = "block" }
-  else
-    c = { text = raw:sub(3):match("^[ \t\r]*(.-)[ \t\r]*$"), style = "line" }
-  end
-  if self.last_value and self:ends_line(i) then
-    local node = self.last_value
-    self.last_value = nil
-    node:comment(self:multiline_container(node, token.s) and "dangling" or "trailing", c.text, c.style)
-  elseif self:ends_line(i) and #self.stack > 0 and self:after_open_delimiter(i) then
-    self.stack[#self.stack].node:comment("trailing", c.text, c.style)
-  else
-    self.pending[#self.pending + 1] = c
-  end
-end
-
-local function parse(input, json5)
-  local tokens = tokenize(input, json5)
-  local p = setmetatable({
-    src = input,
-    json5 = json5,
-    tokens = tokens,
-    state = "ExpectValue",
-    stack = {},
-    pending = {},
-    last_value = nil,
-    root = nil,
-  }, P)
-  for i, token in ipairs(tokens) do
-    if token.kind == "whitespace" then
-      if input:sub(token.s + 1, token.e):find("\n", 1, true) then p.last_value = nil end
-    elseif token.kind == "comment" then
-      p:handle_comment(i)
-    else
-      p:dispatch(token)
+  -- After an element: a `,`, or the close ahead. JSON5 takes a trailing
+  -- comma before the close; JSONC refuses one where the next element
+  -- should be.
+  local function separator(close)
+    return function(sc, ctx)
+      trivia(sc, ctx)
+      if sc:lit(",") then
+        if not json5 then
+          local at = sc.pos - 1
+          trivia(sc, ctx)
+          if close(sc) then sc:fail(MESSAGES.trailing_comma, at) end
+        end
+        return
+      end
+      local p = sc.pos
+      if close(sc) then
+        sc.pos = p
+        return
+      end
+      if not sc:eof() then sc:fail(MESSAGES.comma) end
     end
   end
-  if p.root == nil then fig.fail(MESSAGES.UnexpectedToken, #input) end
-  return p.root
+
+  -- A key claims what is waiting as soon as it is read, so that a comment
+  -- between the `:` and the value is the value's and not the key's; a
+  -- value claims what is waiting for the same reason.
+  local function claims(rule)
+    return function(sc, ctx)
+      local n = rule(sc, ctx)
+      if n ~= nil then ctx:flush(n, "leading") end
+      return n
+    end
+  end
+
+  -- A JSON key is a quoted string; JSON5 takes a bare identifier too, the
+  -- keywords among them (`{ true: 1, null: 2 }`).
+  local key = claims(json5 and G.choice({ string_value, G.key(G.pat(IDENT)) }) or string_value)
+
+  local mapping = container(G.map({
+    open = opener("{"),
+    close = G.lit("}"),
+    trivia = trivia,
+    entry = G.entry({
+      key = key,
+      between = trivia,
+      sep = G.lit(":"),
+      value = claims(function(sc, ctx) return value(sc, ctx) end),
+      missing_sep = MESSAGES.colon,
+      missing_value = MESSAGES.value,
+    }),
+    after = separator(G.lit("}")),
+    duplicates = "keep",
+    expected = MESSAGES.entry,
+    unclosed = MESSAGES.unclosed_object,
+  }))
+
+  local sequence = container(G.sequence({
+    open = opener("["),
+    close = G.lit("]"),
+    trivia = trivia,
+    item = function(sc, ctx) return value(sc, ctx) end,
+    after = separator(G.lit("]")),
+    expected = MESSAGES.item,
+    unclosed = MESSAGES.unclosed_array,
+  }))
+
+  value = G.choice({ mapping, sequence, string_value, number, word })
+
+  -- The document, by hand rather than `G.document`: what is still waiting
+  -- when it ends is dropped, where `document` would dangle it on the root.
+  return function(input)
+    local sc = fig.scanner(input)
+    if input:sub(1, 3) == "\239\187\191" then sc.pos = 3 end
+    local ctx = G.context(sc, { ends_line = true, one = true, closing_line = true })
+    ctx.rest_is_blank = function(_, at) return ends_line(sc, at) end
+    ctx.heads = {}
+    trivia(sc, ctx)
+    local root = value(sc, ctx)
+    if root == nil then sc:fail(sc:eof() and MESSAGES.empty or MESSAGES.value) end
+    ctx:flush(root, "leading")
+    ctx.last = root
+    trivia(sc, ctx)
+    if not sc:eof() then sc:fail(MESSAGES.trailing) end
+    return fig.rows(root)
+  end
 end
+
+local DIALECTS = { ["lua-json5"] = build(true), ["lua-jsonc"] = build(false) }
 
 function M.parse(dialect, input)
-  return parse(input, dialect == "lua-json5")
+  return DIALECTS[dialect](input)
 end
 
 -- ── the printer ───────────────────────────────────────────────────────────
@@ -679,7 +443,7 @@ end
 -- dangling before its close; `pretty` only), and in JSON5 a bare
 -- identifier key, `Infinity`/`NaN` as written, and the number spellings
 -- JSON5 reads (`0xC8`, `.5`, `+1`). A number no JSON can read is written
--- as decimal.
+-- as decimal, which `fig.number` is the rule for.
 
 local function quote(s)
   return '"' .. s:gsub('[%c"\\]', function(ch)
@@ -696,72 +460,12 @@ local function quote(s)
 end
 
 local function is_bare_identifier(name)
-  return name:match("^[A-Za-z_$][A-Za-z0-9_$]*$") ~= nil
+  return name:match("^[%a_$][%w_$]*$") ~= nil
 end
 
--- Whether a format that spells `s` reads `raw` back as the same number.
-local function spellable(raw, s)
-  local body = raw
-  local first = raw:sub(1, 1)
-  if first == "+" or first == "-" then
-    if first == "+" and not s.plus then return false end
-    body = raw:sub(2)
-  end
-  if body == "" then return false end
-  if not s.underscores and body:find("_", 1, true) then return false end
-  if #body >= 2 and body:sub(1, 1) == "0" then
-    local r = body:sub(2, 2):lower()
-    if r == "x" then return s.hex == true end
-    if r == "o" then return s.octal == true end
-    if r == "b" then return s.binary == true end
-  end
-  if not s.bare_dot and (body:sub(1, 1) == "." or body:sub(-1) == ".") then return false end
-  if not s.leading_zero then
-    local int_end = (body:find("[%.eE]") or (#body + 1)) - 1
-    if int_end > 1 and body:sub(1, 1) == "0" then return false end
-  end
-  return true
+local function is_container(row)
+  return row.kind == "mapping" or row.kind == "sequence"
 end
-
--- `raw` as a decimal lexeme every format reads: radix converted, `_` and
--- `+` dropped, bare dots padded, leading zeros stripped.
-local function canonical_number(raw)
-  local out = {}
-  local s = raw
-  if s:sub(1, 1) == "-" then
-    out[#out + 1] = "-"
-    s = s:sub(2)
-  elseif s:sub(1, 1) == "+" then
-    s = s:sub(2)
-  end
-  if #s >= 2 and s:sub(1, 1) == "0" and s:sub(2, 2):lower():match("[xob]") then
-    local base = ({ x = 16, o = 8, b = 2 })[s:sub(2, 2):lower()]
-    local digits = s:sub(3):gsub("_", "")
-    local v = tonumber(digits, base)
-    if v and digits ~= "" and math.type(v) == "integer" then
-      out[#out + 1] = tostring(v)
-    else
-      out[#out + 1] = s
-    end
-    return table.concat(out)
-  end
-  local e_idx = s:find("[eE]")
-  local mantissa = e_idx and s:sub(1, e_idx - 1) or s
-  local exponent = e_idx and s:sub(e_idx) or ""
-  local dot = mantissa:find(".", 1, true)
-  local int_part = dot and mantissa:sub(1, dot - 1) or mantissa
-  local int_digits = int_part:gsub("_", ""):gsub("^0+", "")
-  out[#out + 1] = int_digits == "" and "0" or int_digits
-  if dot then
-    local frac = mantissa:sub(dot + 1):gsub("_", "")
-    out[#out + 1] = "." .. (frac == "" and "0" or frac)
-  end
-  out[#out + 1] = (exponent:gsub("_", ""))
-  return table.concat(out)
-end
-
-local JSON_SPELLING = {}
-local JSON5_SPELLING = { hex = true, bare_dot = true, plus = true }
 
 local Pr = {}
 Pr.__index = Pr
@@ -808,10 +512,6 @@ function Pr:key(row)
   end
 end
 
-local function is_container(row)
-  return row.kind == "mapping" or row.kind == "sequence"
-end
-
 function Pr:node(row, depth)
   local w = self.w
   local k = row.kind
@@ -823,8 +523,7 @@ function Pr:node(row, depth)
     if row.ext_kind == "char_literal" then
       w:put(row.text)
     else
-      local raw = row.text or ""
-      w:put(spellable(raw, self.json5 and JSON5_SPELLING or JSON_SPELLING) and raw or canonical_number(raw))
+      w:put(N.text(row.text or "", self.spelling))
     end
   elseif k == "string" then
     if row.ext_kind == "number_special" and self.json5 then
@@ -876,7 +575,8 @@ end
 
 function M.print(dialect, t, options)
   local w = fig.writer(options)
-  local p = setmetatable({ w = w, json5 = dialect == "lua-json5" }, Pr)
+  local json5 = dialect == "lua-json5"
+  local p = setmetatable({ w = w, json5 = json5, spelling = json5 and N.JSON5 or N.JSON }, Pr)
   local root = t.byid(0)
   p:leading(root, 0)
   p:node(root, 0)
