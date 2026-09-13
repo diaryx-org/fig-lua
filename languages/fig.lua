@@ -42,6 +42,13 @@
 -- offsets. What is not carried: the authoring-time warnings (a leading
 -- zero kept as text, an indent that disagrees with its markers), which
 -- have no row.
+--
+-- What fig shares with the other section formats — the region a header
+-- line is, the mention a name is, the comments waiting for a key, by
+-- depth — is the grammar module's `sections`; the frames, the markers and
+-- what a header may re-enter are fig's own.
+
+local G = require("fig.grammar")
 
 local M = {}
 
@@ -439,7 +446,7 @@ end
 -- ── containers, entries, nodes ──
 
 local function new_container()
-  return { kind = "undecided", closed = false, born_of_append = false, entries = {}, index = {}, elements = {}, style = "undecided", reentries = {}, reentry_names = {} }
+  return { kind = "undecided", closed = false, born_of_append = false, entries = {}, index = {}, elements = {}, style = "undecided", reentries = {} }
 end
 
 local function new_node(value, span)
@@ -605,10 +612,11 @@ end
 
 -- ── comments and frames ──
 
-function P:drain_pending()
+-- The waiting comments from lines at `depth` (0: all of them) or deeper,
+-- as text: what the intermediate tree keeps of a comment.
+function P:drain_pending(depth)
   local out = {}
-  for _, pc in ipairs(self.pending) do out[#out + 1] = pc.text end
-  self.pending = {}
+  for _, c in ipairs(self.sections:take(depth)) do out[#out + 1] = c.text end
   return out
 end
 
@@ -621,17 +629,7 @@ function P:close_frames_above(depth)
     local frame = table.remove(self.stack)
     if frame.container.kind == "undecided" then self:fail("FigEmptyContainer") end
     if frame.container.born_of_append and #frame.container.entries == 0 then self:fail("FigEmptyContainer") end
-    if #self.pending > 0 then
-      local keep = {}
-      for _, pc in ipairs(self.pending) do
-        if pc.depth >= frame.child_depth then
-          frame.owner.dangling[#frame.owner.dangling + 1] = pc.text
-        else
-          keep[#keep + 1] = pc
-        end
-      end
-      self.pending = keep
-    end
+    append_all(frame.owner.dangling, self:drain_pending(frame.child_depth))
   end
 end
 
@@ -791,8 +789,7 @@ function P:resolve_header_final(parent, last)
     if e then
       if e.value.value.kind ~= "container" then self:fail("FigDuplicateKey") end
       local c = self:open(e.value.value.container)
-      c.reentries[#c.reentries + 1] = k.span[1]
-      c.reentry_names[#c.reentry_names + 1] = k.span
+      c.reentries[#c.reentries + 1] = { at = k.span[1], name = k.span }
       return c, e.value, e
     end
     local child = new_container()
@@ -815,7 +812,7 @@ function P:resolve_header_final(parent, last)
     local el = s.elements[idx + 1]
     if el.value.kind ~= "container" then self:fail("FigKeyNotContainer") end
     local c = self:open(el.value.container)
-    c.reentries[#c.reentries + 1] = self.cur_line_start
+    c.reentries[#c.reentries + 1] = { at = self.cur_line_start }
     return c, el, nil
   elseif idx == #s.elements then
     local child = new_container()
@@ -1411,7 +1408,7 @@ function P:process_line(line_start)
     local j = self.pos
     while j < self.n and self:at(j) ~= 10 do j = j + 1 end
     local text = self.src:sub(self.pos + 1, j):match("^[ \t\r]*(.-)[ \t\r]*$")
-    self.pending[#self.pending + 1] = { text = text, depth = depth }
+    self.sections:comment(text, depth)
     self.pos = j
     self:skip_to_next_line()
     return
@@ -1423,7 +1420,21 @@ end
 -- Containers widen to their last child's end here, so every span below is
 -- final before the one above it is read.
 
-local function build_node(node, out_regions)
+-- A block container is a section: the line that created it is its first
+-- region, and every header that re-entered it by its final segment adds
+-- a region and, when the segment is a key, a mention.
+local function is_section(node)
+  local v = node.value
+  return v.kind == "container" and not v.container.closed and not v.container.is_root
+end
+
+local function reenter(S, built, c)
+  for _, r in ipairs(c.reentries) do
+    if r.name then S:reopen(built, r.name, "entry") else S:region(built, r.at) end
+  end
+end
+
+local function build_node(S, node)
   local v = node.value
   local built
   if v.kind == "container" then
@@ -1435,36 +1446,33 @@ local function build_node(node, out_regions)
       for _, e in ipairs(c.entries) do
         local key = fig.scalar("string", e.key_span, e.key)
         for _, t in ipairs(e.key_leading) do key:comment("leading", t) end
-        local value = build_node(e.value)
-        if e.value.value.kind == "container" and not e.value.value.container.closed then
-          value.mentions = value.mentions or {}
-          value.mentions[#value.mentions + 1] = { span = e.key_span, kind = "entry" }
-          for _, name in ipairs(e.value.value.container.reentry_names) do
-            value.mentions[#value.mentions + 1] = { span = name, kind = "entry" }
-          end
-        end
+        local value = build_node(S, e.value)
         local kv = fig.entry(key, value, { e.key_span[1], e.value.span[2] })
         if e.sep_span then kv.sep = e.sep_span end
         if e.value.span[2] > end_ then end_ = e.value.span[2] end
-        built.entries[#built.entries + 1] = kv
+        if is_section(e.value) then
+          S:open(built, kv, "entry")
+          reenter(S, value, e.value.value.container)
+        else
+          built:put(kv)
+        end
       end
     else
       built = fig.sequence(nil)
       for _, el in ipairs(c.elements) do
-        local item = build_node(el)
+        local item = build_node(S, el)
         if el.span[2] > end_ then end_ = el.span[2] end
         if el.marker then item.marker = el.marker end
         for _, t in ipairs(el.leading) do item:comment("leading", t) end
-        built.items[#built.items + 1] = item
+        built:add(item)
+        if is_section(el) then
+          S:region(item, el.span[1])
+          reenter(S, item, el.value.container)
+        end
       end
     end
     if end_ > node.span[2] then node.span[2] = end_ end
     built.span = { node.span[1], node.span[2] }
-    if not c.closed and not c.is_root then
-      built.regions = built.regions or {}
-      built.regions[#built.regions + 1] = { node.span[1], "line" }
-      for _, off in ipairs(c.reentries) do built.regions[#built.regions + 1] = { off, "line" } end
-    end
   else
     local extra = {}
     if v.ext_kind then extra.ext_kind = v.ext_kind end
@@ -1476,31 +1484,8 @@ local function build_node(node, out_regions)
   return built
 end
 
--- The whole physical line holding `at`, newline included: a region.
-local function line_region(src, at)
-  local s = at
-  while s > 0 and src:byte(s) ~= 10 do s = s - 1 end
-  local e = at
-  while e < #src and src:byte(e + 1) ~= 10 do e = e + 1 end
-  if e < #src then e = e + 1 end
-  return { s, e }
-end
-
-local function resolve_regions(src, node)
-  if node.regions then
-    for i, r in ipairs(node.regions) do
-      if r[2] == "line" then node.regions[i] = line_region(src, r[1]) end
-    end
-  end
-  if node.kind == "mapping" then
-    for _, e in ipairs(node.entries) do resolve_regions(src, e.value) end
-  elseif node.kind == "sequence" then
-    for _, item in ipairs(node.items) do resolve_regions(src, item) end
-  end
-end
-
 local function parse_document(input)
-  local self = setmetatable({ src = input, n = #input, pos = 0, root = new_container(), root_dangling = {}, pending = {}, stack = {}, last_append_steps = nil, cur_line_start = 0 }, P)
+  local self = setmetatable({ src = input, n = #input, pos = 0, root = new_container(), root_dangling = {}, sections = G.sections(input), stack = {}, last_append_steps = nil, cur_line_start = 0 }, P)
   self.root.is_root = true
   if input:sub(1, 3) == "\239\187\191" then self.pos = 3 end
   while self.pos < self.n do
@@ -1509,15 +1494,12 @@ local function parse_document(input)
     self:process_line(line_start)
   end
   self:close_frames_above(0)
-  for _, pc in ipairs(self.pending) do self.root_dangling[#self.root_dangling + 1] = pc.text end
-  self.pending = {}
+  append_all(self.root_dangling, self:drain_pending())
   -- An empty document is an empty mapping.
   if self.root.kind == "undecided" then self.root.kind = "mapping" end
   local root_wrap = new_node({ kind = "container", container = self.root }, { 0, 0 })
   root_wrap.dangling = self.root_dangling
-  local root = build_node(root_wrap)
-  resolve_regions(input, root)
-  return root
+  return build_node(self.sections, root_wrap)
 end
 
 function M.parse(_dialect, input)

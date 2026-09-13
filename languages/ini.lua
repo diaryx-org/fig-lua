@@ -31,6 +31,8 @@
 -- parser, so a file with a lexical error after a grammatical one reports
 -- the lexical one; this reports the first.
 
+local G = require("fig.grammar")
+
 local M = {}
 
 M.name = "lua-ini"
@@ -152,20 +154,10 @@ local function decode_value(raw)
   return raw
 end
 
--- The whole physical line holding `at`, newline included: a region.
-local function line_region(src, at)
-  local s = at
-  while s > 0 and src:byte(s) ~= 10 do s = s - 1 end
-  local e = at
-  while e < #src and src:byte(e + 1) ~= 10 do e = e + 1 end
-  if e < #src then e = e + 1 end
-  return { s, e }
-end
-
 function M.parse(_dialect, input)
   local tokens = tokenize(input)
   local pos = 1
-  local pending = {}
+  local S = G.sections(input)
   local root = fig.mapping({ 0, #input })
   local current = root
 
@@ -176,15 +168,11 @@ function M.parse(_dialect, input)
     return t
   end
   local function text(t) return input:sub(t.s + 1, t.e) end
-  local function claim(node, slot)
-    for _, c in ipairs(pending) do node:comment(slot, c) end
-    pending = {}
-  end
   local function skip_blank()
     while true do
       local k = peek().kind
       if k == "comment" then
-        pending[#pending + 1] = text(peek()):match("^[ \t\r]*(.-)[ \t\r]*$")
+        S:comment(text(peek()):match("^[ \t\r]*(.-)[ \t\r]*$"))
         pos = pos + 1
       elseif k == "newline" then
         pos = pos + 1
@@ -210,17 +198,12 @@ function M.parse(_dialect, input)
     if existing then
       local m = existing.value
       if m.kind ~= "mapping" then fig.fail(MESSAGES.DuplicateKey, name_tok.s) end
-      m.regions[#m.regions + 1] = line_region(input, name_tok.s)
-      m.mentions[#m.mentions + 1] = { span = span, kind = "header" }
+      S:reopen(m, span, "header")
       current = m
     else
       local key = fig.scalar("string", span, name)
-      claim(key, "leading")
-      local m = fig.mapping(span)
-      m.regions = { line_region(input, name_tok.s) }
-      m.mentions = { { span = span, kind = "header" } }
-      root:put(fig.entry(key, m))
-      current = m
+      S:claim(key, "leading")
+      current = S:open(root, fig.entry(key, fig.mapping(span)), "header")
     end
   end
 
@@ -238,7 +221,7 @@ function M.parse(_dialect, input)
       span = { value_tok.s, value_tok.e }
     end
     local key = fig.scalar("string", { key_tok.s, key_tok.e }, name)
-    claim(key, "leading")
+    S:claim(key, "leading")
     current:put(fig.entry(key, fig.scalar("string", span, decode_value(raw))))
   end
 
@@ -254,7 +237,7 @@ function M.parse(_dialect, input)
     end
     skip_blank()
   end
-  claim(current, "dangling")
+  S:claim(current, "dangling")
   return root
 end
 

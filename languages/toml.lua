@@ -6,11 +6,12 @@
 -- is written against `fig lang table -i toml`, which prints that table.
 -- What the compiled format accepts is stated in fig's `src/languages/toml/`
 -- (`tokenizer.zig`, `parser.zig`, `printer.zig`), and this follows them
--- function for function. Where the grammar module would do, it is not
--- used: TOML is a section format, and what makes it one — the table a
--- `[header]` opens, the regions and mentions the editor moves a table by,
--- the rules for which line may extend which table — is exactly what the
--- compiled parser states by hand, so this states it by hand too.
+-- function for function. The grammar module's rules would not do: TOML
+-- is a section format, and the rules for which line may open or extend
+-- which table are exactly what the compiled parser states by hand, so
+-- this states them by hand too. What every section format shares — the
+-- region a header line is, the mention a name is, the comments waiting
+-- for a key — is the grammar module's `sections`, and comes from there.
 --
 -- The shape, as the compiled parser builds it:
 --
@@ -43,6 +44,8 @@
 -- offsets, with one difference of order: the compiled tokenizer runs over
 -- the whole file before its parser, so a file with a lexical error after
 -- a grammatical one reports the lexical one; this reports the first.
+
+local G = require("fig.grammar")
 
 local M = {}
 
@@ -635,7 +638,7 @@ local function new_parser(src, tokens, v11)
     tokens = tokens,
     pos = 1,
     v11 = v11,
-    pending = {}, -- comments waiting for a key
+    sections = G.sections(src), -- regions, mentions, comments waiting for a key
     last_value = nil, -- the node a same-line comment trails
     meta = {}, -- per table: explicit / dotted / implicit / aot / inline_table
   }, P)
@@ -665,7 +668,7 @@ function P:capture_comment(t)
     self.last_value:comment("trailing", text)
     self.last_value = nil
   else
-    self.pending[#self.pending + 1] = text
+    self.sections:comment(text)
   end
 end
 
@@ -708,44 +711,11 @@ function P:skip_flow_ws()
   if self.v11 then self:skip_blank() else self:skip_inline() end
 end
 
-function P:claim_leading(node)
-  for _, text in ipairs(self.pending) do node:comment("leading", text) end
-  self.pending = {}
-end
-
-function P:claim_dangling(node)
-  for _, text in ipairs(self.pending) do node:comment("dangling", text) end
-  self.pending = {}
-end
-
 function P:require_line_end()
   self:skip_inline()
   local k = self:peek().kind
   if k ~= "newline" and k ~= "end_of_file" then self:fail(MESSAGES.TrailingContent) end
 end
-
--- The whole physical line holding `at`, newline included: a region.
-function P:line_region(at)
-  local src = self.src
-  local s = at
-  while s > 0 and src:byte(s) ~= 10 do s = s - 1 end
-  local e = at
-  while e < #src and src:byte(e + 1) ~= 10 do e = e + 1 end
-  if e < #src then e = e + 1 end
-  return { s, e }
-end
-
-local function add_region(node, r)
-  node.regions = node.regions or {}
-  node.regions[#node.regions + 1] = r
-end
-
-local function add_mention(node, span, kind)
-  node.mentions = node.mentions or {}
-  node.mentions[#node.mentions + 1] = { span = span, kind = kind }
-end
-
-function P:record_header(node, at) add_region(node, self:line_region(at)) end
 
 -- ── keys ──
 
@@ -779,19 +749,24 @@ function P:lookup_child(map, key)
   return nil
 end
 
-function P:append_key_value(map, seg, value)
+function P:key_of(seg)
   local key = fig.scalar("string", seg.span, seg.str)
-  self:claim_leading(key)
-  local e = fig.entry(key, value, { seg.span[1], value.span[2] })
+  self.sections:claim(key, "leading")
+  return key
+end
+
+function P:append_key_value(map, seg, value)
+  local e = fig.entry(self:key_of(seg), value, { seg.span[1], value.span[2] })
   map.entries[#map.entries + 1] = e
   return e
 end
 
-function P:create_table(parent, seg, meta)
+-- A table `seg` names, opened under `parent`: its header line the first
+-- region, its name the first mention, of `kind`.
+function P:create_table(parent, seg, meta, kind)
   local m = fig.mapping(seg.span, { duplicates = "keep" })
-  self:append_key_value(parent, seg, m)
+  self.sections:open(parent, fig.entry(self:key_of(seg), m), kind)
   self.meta[m] = meta
-  self:record_header(m, seg.span[1])
   return m
 end
 
@@ -827,11 +802,11 @@ function P:navigate_header_path(start, segs, count)
     local seg = segs[j]
     local child = self:lookup_child(cur, seg.str)
     if child then
-      add_mention(child, seg.span, "header")
+      -- Passed through, not reopened: a mention and no region.
+      self.sections:mention(child, seg.span, "header")
       cur = self:descend(child, seg)
     else
-      cur = self:create_table(cur, seg, { implicit = true })
-      add_mention(cur, seg.span, "header")
+      cur = self:create_table(cur, seg, { implicit = true }, "header")
     end
   end
   return cur
@@ -846,12 +821,10 @@ function P:navigate_dotted_path(start, segs, count)
       if child.kind ~= "mapping" then self:fail_at(seg.span[1], MESSAGES.DuplicateKey) end
       local meta = self.meta[child] or {}
       if meta.explicit or meta.inline_table then self:fail_at(seg.span[1], MESSAGES.DuplicateKey) end
-      self:record_header(child, seg.span[1])
-      add_mention(child, seg.span, "entry")
+      self.sections:reopen(child, seg.span, "entry")
       cur = child
     else
-      cur = self:create_table(cur, seg, { dotted = true })
-      add_mention(cur, seg.span, "entry")
+      cur = self:create_table(cur, seg, { dotted = true }, "entry")
     end
   end
   return cur
@@ -874,12 +847,10 @@ function P:parse_table_header()
     local meta = self.meta[child] or {}
     if meta.explicit or meta.dotted or meta.inline_table then self:fail_at(final.span[1], MESSAGES.DuplicateKey) end
     self.meta[child] = { explicit = true }
-    self:record_header(child, final.span[1])
-    add_mention(child, final.span, "header")
+    self.sections:reopen(child, final.span, "header")
     self.current = child
   else
-    self.current = self:create_table(cur, final, { explicit = true })
-    add_mention(self.current, final.span, "header")
+    self.current = self:create_table(cur, final, { explicit = true }, "header")
   end
 end
 
@@ -896,20 +867,17 @@ function P:parse_array_table()
   if child then
     local meta = self.meta[child] or {}
     if child.kind ~= "sequence" or not meta.aot then self:fail_at(final.span[1], MESSAGES.DuplicateKey) end
-    self:record_header(child, final.span[1])
-    add_mention(child, final.span, "header")
+    self.sections:reopen(child, final.span, "header")
     self.current = self:append_array_element(child)
   else
     local seq = fig.sequence(final.span)
-    self:append_key_value(cur, final, seq)
+    self.sections:open(cur, fig.entry(self:key_of(final), seq), "header")
     self.meta[seq] = { aot = true }
-    self:record_header(seq, final.span[1])
-    add_mention(seq, final.span, "header")
     self.current = self:append_array_element(seq)
   end
   -- The element shares the array's span, so its `[[…]]` line is recorded
   -- on the element too: the only way its header is findable.
-  self:record_header(self.current, final.span[1])
+  self.sections:region(self.current, final.span[1])
 end
 
 function P:parse_key_value()
@@ -1083,7 +1051,7 @@ function M.parse(dialect, input)
   end
   -- Comments left at the end of the file dangle off the table the last
   -- header opened.
-  p:claim_dangling(p.current)
+  p.sections:claim(p.current, "dangling")
   return root
 end
 
