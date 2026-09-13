@@ -30,6 +30,7 @@
 -- brackets and a string's its quotes.
 
 local G = require("fig.grammar")
+local N = require("fig.number")
 
 local M = {}
 
@@ -55,17 +56,22 @@ M.samples = {
 }
 M.renderers = {}
 
--- ── errors, as the compiled parser words them ─────────────────────────────
--- Nearly everything is `UnexpectedToken`: the compiled tokenizer runs
--- first and its refusals are what a document meets, so the parser's more
--- specific messages (a missing colon, an unquoted key) are not reached.
+-- ── refusals ──────────────────────────────────────────────────────────────
+-- JSON's grammar is small and so is its vocabulary of refusals: nearly
+-- everything wrong is a byte where no value, separator or closer can
+-- begin, and that is `UNEXPECTED`. The two that are worth a sentence of
+-- their own are named here; the rest are written where they are raised.
 
-local MESSAGES = {
-  UnexpectedToken = "unexpected token here; check for a missing comma, colon, key, or closing bracket/brace",
-  UnexpectedEndOfInput = "the document ended before this value/token was complete",
-  UnclosedString = "unclosed string; a JSON string cannot span multiple lines — add the closing quote, or escape the newline as `\\n`",
-  LeadingZero = "a number cannot have a leading zero; write the digits without the padding, or quote it as a string to keep the padding (e.g. a zip code)",
-}
+local UNEXPECTED = "unexpected token here; check for a missing comma, colon, key, or closing bracket/brace"
+local UNCLOSED_STRING =
+  "unclosed string; a JSON string cannot span multiple lines — add the closing quote, or escape the newline as `\\n`"
+
+-- Nothing more can be read: the end of the input where a value was due, or
+-- a byte that begins nothing.
+local function unexpected(sc)
+  if sc:eof() then sc:fail("the document ended before this value was complete") end
+  sc:fail(UNEXPECTED)
+end
 
 -- ── scalars ───────────────────────────────────────────────────────────────
 
@@ -82,7 +88,7 @@ local function string_value(sc)
   local raw = false
   local i = s + 1
   while true do
-    if i >= n then sc:fail(MESSAGES.UnclosedString, n) end
+    if i >= n then sc:fail(UNCLOSED_STRING, n) end
     local c = src:byte(i + 1)
     if c == 34 then
       i = i + 1
@@ -93,33 +99,31 @@ local function string_value(sc)
         local hex = src:sub(i + 3, i + 6)
         if not hex:match("^%x%x%x%x$") then
           local bad = hex:find("[^%x]") or (#hex + 1)
-          if i + 1 + bad >= n then sc:fail(MESSAGES.UnclosedString, n) end
-          sc:fail(MESSAGES.UnexpectedToken, i + 1 + bad)
+          if i + 1 + bad >= n then sc:fail(UNCLOSED_STRING, n) end
+          sc:fail(UNEXPECTED, i + 1 + bad)
         end
         local cp = tonumber(hex, 16)
-        if cp >= 0xD800 and cp <= 0xDBFF and src:sub(i + 7, i + 8) == "\\u" then
-          local lo = src:sub(i + 9, i + 12)
-          local lcp = lo:match("^%x%x%x%x$") and tonumber(lo, 16)
-          if lcp and lcp >= 0xDC00 and lcp <= 0xDFFF then
-            out[#out + 1] = utf8.char(0x10000 + ((cp - 0xD800) << 10) + (lcp - 0xDC00))
-            i = i + 12
-            goto continue
-          end
+        local lo = src:sub(i + 7, i + 8) == "\\u" and src:sub(i + 9, i + 12) or ""
+        local pair = lo:match("^%x%x%x%x$") and fig.surrogate_pair(cp, tonumber(lo, 16))
+        if pair then
+          out[#out + 1] = utf8.char(pair)
+          i = i + 12
+          goto continue
         end
-        -- Unpaired: the compiled parser gives up decoding and keeps the
-        -- whole string as written.
-        if cp >= 0xD800 and cp <= 0xDFFF then raw = true else out[#out + 1] = utf8.char(cp) end
+        -- Unpaired: the string is kept as written, every escape in it
+        -- undecoded, which is what a reader of the source sees.
+        if fig.is_surrogate(cp) then raw = true else out[#out + 1] = utf8.char(cp) end
         i = i + 6
       elseif SIMPLE_ESCAPES[e] then
         out[#out + 1] = SIMPLE_ESCAPES[e]
         i = i + 2
       elseif e == "" then
-        sc:fail(MESSAGES.UnclosedString, n)
+        sc:fail(UNCLOSED_STRING, n)
       else
-        sc:fail(MESSAGES.UnexpectedToken, i + 1)
+        sc:fail(UNEXPECTED, i + 1)
       end
     elseif c < 32 then
-      sc:fail(MESSAGES.UnexpectedToken, i)
+      sc:fail(UNEXPECTED, i)
     else
       out[#out + 1] = string.char(c)
       i = i + 1
@@ -139,25 +143,19 @@ local function number(sc)
   if c == 45 then
     sc:advance()
     c = sc:byte()
-    if not (c and c >= 48 and c <= 57) then
-      if sc:eof() then sc:fail(MESSAGES.UnexpectedEndOfInput) end
-      sc:fail(MESSAGES.UnexpectedToken)
-    end
+    if not (c and c >= 48 and c <= 57) then unexpected(sc) end
   end
   if c == 48 then
     sc:advance()
     local d = sc:byte()
-    if d and d >= 48 and d <= 57 then sc:fail(MESSAGES.LeadingZero) end
+    if d and d >= 48 and d <= 57 then sc:fail("a number cannot have a leading zero; write the digits without the padding, or quote it as a string to keep the padding (e.g. a zip code)") end
   else
     sc:match("%d+")
   end
   local kind = "int"
   if sc:byte() == 46 then
     sc:advance()
-    if not sc:match("%d+") then
-      if sc:eof() then sc:fail(MESSAGES.UnexpectedEndOfInput) end
-      sc:fail(MESSAGES.UnexpectedToken)
-    end
+    if not sc:match("%d+") then unexpected(sc) end
     kind = "float"
   end
   local e = sc:byte()
@@ -165,10 +163,7 @@ local function number(sc)
     sc:advance()
     local sign = sc:byte()
     if sign == 43 or sign == 45 then sc:advance() end
-    if not sc:match("%d+") then
-      if sc:eof() then sc:fail(MESSAGES.UnexpectedEndOfInput) end
-      sc:fail(MESSAGES.UnexpectedToken)
-    end
+    if not sc:match("%d+") then unexpected(sc) end
     kind = "float"
   end
   return fig.scalar(kind, { s, sc.pos }, sc:slice(s, sc.pos))
@@ -183,7 +178,7 @@ local function literal(sc)
   local word = sc:slice(ws, we)
   if word == "null" then return fig.scalar("null", { s, we }, nil) end
   if word == "true" or word == "false" then return fig.scalar("bool", { s, we }, word) end
-  sc:fail(MESSAGES.UnexpectedToken, s)
+  sc:fail(UNEXPECTED, s)
 end
 
 -- ── containers ────────────────────────────────────────────────────────────
@@ -201,7 +196,7 @@ local function separator(close)
     trivia(sc, ctx)
     if sc:lit(",") then
       trivia(sc, ctx)
-      if close(sc) then sc:fail(MESSAGES.UnexpectedToken, sc.pos - 1) end
+      if close(sc) then sc:fail(UNEXPECTED, sc.pos - 1) end
       return
     end
     local p = sc.pos
@@ -210,7 +205,7 @@ local function separator(close)
       return
     end
     if sc:eof() then return end
-    sc:fail(MESSAGES.UnexpectedToken)
+    sc:fail(UNEXPECTED)
   end
 end
 
@@ -223,13 +218,13 @@ local mapping = G.map({
     between = G.ws,
     sep = G.lit(":"),
     value = function(sc, ctx) return value(sc, ctx) end,
-    missing_sep = MESSAGES.UnexpectedToken,
-    missing_value = MESSAGES.UnexpectedToken,
+    missing_sep = UNEXPECTED,
+    missing_value = UNEXPECTED,
   }),
   after = separator(G.lit("}")),
   duplicates = "keep",
-  expected = MESSAGES.UnexpectedToken,
-  unclosed = MESSAGES.UnexpectedToken,
+  expected = UNEXPECTED,
+  unclosed = UNEXPECTED,
 })
 
 local sequence = G.sequence({
@@ -238,8 +233,8 @@ local sequence = G.sequence({
   trivia = trivia,
   item = function(sc, ctx) return value(sc, ctx) end,
   after = separator(G.lit("]")),
-  expected = MESSAGES.UnexpectedToken,
-  unclosed = MESSAGES.UnexpectedToken,
+  expected = UNEXPECTED,
+  unclosed = UNEXPECTED,
 })
 
 value = G.choice({ mapping, sequence, string_value, number, literal })
@@ -248,8 +243,8 @@ M.parse = G.document({
   bom = true,
   root = value,
   trivia = trivia,
-  missing = MESSAGES.UnexpectedToken,
-  trailing = MESSAGES.UnexpectedToken,
+  missing = UNEXPECTED,
+  trailing = UNEXPECTED,
 })
 
 -- ── the printer ───────────────────────────────────────────────────────────
@@ -274,51 +269,6 @@ local function quote(s)
   end) .. '"'
 end
 
--- Whether strict JSON reads `raw` back as the same number: a plain
--- decimal — no radix, no `_`, no `+`, no bare dot, no leading zero.
-local function json_spellable(raw)
-  local body = raw:sub(1, 1) == "-" and raw:sub(2) or raw
-  if body == "" or raw:sub(1, 1) == "+" or body:find("_", 1, true) then return false end
-  if body:match("^0[xXoObB]") then return false end
-  if body:sub(1, 1) == "." or body:sub(-1) == "." then return false end
-  local int_end = (body:find("[%.eE]") or (#body + 1)) - 1
-  if int_end > 1 and body:sub(1, 1) == "0" then return false end
-  return true
-end
-
--- `raw` as a decimal lexeme, as the compiled printer canonicalizes a
--- number another format spelled: radix converted, `_` and `+` dropped,
--- bare dots padded, leading zeros stripped.
-local function canonical_number(raw)
-  local out = {}
-  local s = raw
-  if s:sub(1, 1) == "-" then
-    out[#out + 1] = "-"
-    s = s:sub(2)
-  elseif s:sub(1, 1) == "+" then
-    s = s:sub(2)
-  end
-  local radix = s:match("^0([xXoObB])")
-  if radix then
-    local digits = s:sub(3):gsub("_", "")
-    local v = tonumber(digits, ({ x = 16, o = 8, b = 2 })[radix:lower()])
-    out[#out + 1] = (v and digits ~= "" and math.type(v) == "integer") and tostring(v) or s
-    return table.concat(out)
-  end
-  local e_idx = s:find("[eE]")
-  local mantissa = e_idx and s:sub(1, e_idx - 1) or s
-  local exponent = e_idx and s:sub(e_idx) or ""
-  local dot = mantissa:find(".", 1, true)
-  local int_digits = (dot and mantissa:sub(1, dot - 1) or mantissa):gsub("_", ""):gsub("^0+", "")
-  out[#out + 1] = int_digits == "" and "0" or int_digits
-  if dot then
-    local frac = mantissa:sub(dot + 1):gsub("_", "")
-    out[#out + 1] = "." .. (frac == "" and "0" or frac)
-  end
-  out[#out + 1] = (exponent:gsub("_", ""))
-  return table.concat(out)
-end
-
 local function write_node(w, row, depth)
   local k = row.kind
   if k == "null" then
@@ -327,9 +277,8 @@ local function write_node(w, row, depth)
     w:put(row.text)
   elseif k == "int" or k == "float" then
     -- A number parsed here is its own lexeme; one from another format's
-    -- tree (`0xff`, `1_000`) is written as JSON reads it.
-    local raw = row.text or ""
-    w:put(json_spellable(raw) and raw or canonical_number(raw))
+    -- tree (`0xff`, `1_000`) is canonicalized to the decimal JSON reads.
+    w:put(N.text(row.text or "", N.JSON))
   elseif k == "string" then
     w:put(quote(row.text or ""))
   elseif k == "sequence" or k == "mapping" then

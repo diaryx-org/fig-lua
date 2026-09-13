@@ -5,8 +5,8 @@
 -- one-spelling encoding of every node kind fig has, the oracle two
 -- documents are compared through — so this script touches every row the
 -- wire can carry, which neither `dotenv.lua` (flat) nor `plist.lua` (XML)
--- does. What the compiled parser accepts is `src/canonical/parser.zig` in
--- fig, and this follows it:
+-- does. The form, and the tree it makes — the contract this script is held
+-- to, fixture by fixture, against the compiled `canonical`:
 --
 --   node   ::= ('&' name | '!' tag)* value
 --   value  ::= 'null' | 'true' | 'false'
@@ -20,8 +20,8 @@
 -- A number's kind is implied by its lexeme (`0x…` is an int; a `.` or an
 -- exponent makes a float) unless `~i`/`~f` pins it; the prefix is in the
 -- span and not in the text. Repeated keys all stay. Comments are `//` to
--- the end of the line and `/* … */`; where each binds is the compiled
--- parser's rule, which is nearly the grammar module's and not quite:
+-- the end of the line and `/* … */`; where each binds is the grammar
+-- module's rule with `one` and `closing_line` set, which is to say:
 --
 --   * a `//` on the line a container opens is that container's trailing
 --     comment (a block comment there leads the first child);
@@ -112,7 +112,7 @@ local function decode(raw, span)
           fig.fail("invalid `\\u` escape in a string; expected four hex digits", span[1])
         end
         local cp = tonumber(hex, 16)
-        if cp >= 0xD800 and cp <= 0xDFFF then
+        if fig.is_surrogate(cp) then
           fig.fail("invalid `\\u` escape in a string; a surrogate is not a character", span[1])
         end
         out[#out + 1] = utf8.char(cp)
@@ -319,34 +319,17 @@ node = function(sc, ctx)
   return v
 end
 
--- What a comment met in trivia binds to. The module's rule — on the line
--- of the last node completed, its trailing; otherwise waiting — with the
--- compiled parser's two refinements: a container that spans lines takes
--- the comment on its closing line as dangling, and a node takes one
--- trailing comment, a second on the same line waiting like any other.
-local function bind(ctx, c)
-  local last = ctx.last
-  if last and ctx.sc:same_line(last.span[2], c[1]) then
-    if is_container(last) and not ctx.sc:same_line(last.span[1], last.span[2]) then
-      last:comment("dangling", c.text, c.style)
-    else
-      last:comment("trailing", c.text, c.style)
-    end
-    ctx.last = nil
-    return
-  end
-  ctx.pending[#ctx.pending + 1] = c
-  ctx.last = nil
-end
-
 -- The document, by hand rather than `G.document`: the root's comments
 -- bind by rules of their own (see the top), and the binding policy is the
 -- context's, so this is where a script states one.
 function M.parse(_dialect, input)
   local sc = fig.scanner(input)
-  local ctx = G.context(sc)
+  -- The binding rule is the context's own, refined twice: `closing_line` —
+  -- a container that spans lines takes the comment on its closing line as
+  -- dangling, not trailing; `one` — a node takes one trailing comment, a
+  -- second on the same line waiting like any other.
+  local ctx = G.context(sc, { one = true, closing_line = true })
   ctx.heads = {}
-  ctx.comment = bind
   trivia(sc, ctx)
   local root = node(sc, ctx)
   if root == nil then

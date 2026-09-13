@@ -2,12 +2,12 @@
 -- `fig` format, `.figl` — row for row, region for region, mention for
 -- mention, marker for marker.
 --
--- `fig lang check lua-fig --against fig <files…>` holds this script to the
--- compiled parser's node table on every file given, and this script is
--- written against `fig lang table -i fig`, which prints that table. What
--- the compiled format accepts is stated in fig's `src/languages/fig/`
--- (`DESIGN.md`, `tokenizer.zig`, `parser.zig`, `printer.zig`), and this
--- follows the parser and the printer function for function.
+-- The contract is the format and the tree it makes: for every document the
+-- compiled `fig` reads, this script builds the same node table and prints
+-- the same bytes. `fig lang table -i fig` prints that table, and `fig lang
+-- check lua-fig --against fig <files…>` holds this script to it on any
+-- file; where the format is written down is fig's `src/languages/fig/`
+-- (`DESIGN.md`, `tokenizer.zig`, `parser.zig`, `printer.zig`).
 --
 -- The shape, as the compiled parser builds it:
 --
@@ -38,10 +38,11 @@
 --     trails the value; what waits at the end dangles on the root;
 --     comments inside a flow value are discarded.
 --
--- The refusals are the compiled parser's, in its words and at its
--- offsets. What is not carried: the authoring-time warnings (a leading
--- zero kept as text, an indent that disagrees with its markers), which
--- have no row.
+-- This script refuses every document the compiled format refuses, in
+-- words and at offsets of its own — the message is written for whoever is
+-- holding the file, not copied. What is not carried: the authoring-time
+-- warnings (a leading zero kept as text, an indent that disagrees with
+-- its markers), which have no row.
 --
 -- What fig shares with the other section formats — the region a header
 -- line is, the mention a name is, the comments waiting for a key, by
@@ -49,6 +50,7 @@
 -- what a header may re-enter are fig's own.
 
 local G = require("fig.grammar")
+local DT = require("fig.datetime")
 
 local M = {}
 
@@ -77,7 +79,7 @@ M.samples = { "a = 1\ndatabase\n> host = localhost\n> port = 5432\n" }
 -- section one marker level below the key.
 M.renderers = { "tail" }
 
--- ── errors, as the compiled parser words them ─────────────────────────────
+-- ── refusals ──────────────────────────────────────────────────────────────
 
 local E = {
   FigForeignSyntaxColon = "`:` introduces a type, not a value; write `key = value`, or `key: type = value`",
@@ -179,65 +181,10 @@ local function sniff_number(token)
   return is_float and "float" or "int"
 end
 
--- RFC 3339, as fig's shared `util.datetime` classifies it (minute
--- precision and a bare time both allowed here).
-local function two(s, at) return tonumber(s:sub(at, at + 1)) end
-local function both_digits(s, at)
-  local a, b = s:byte(at), s:byte(at + 1)
-  return a ~= nil and b ~= nil and is_digit(a) and is_digit(b)
-end
-local function days_in_month(year, month)
-  if month == 2 then
-    return ((year % 4 == 0 and year % 100 ~= 0) or year % 400 == 0) and 29 or 28
-  end
-  if month == 4 or month == 6 or month == 9 or month == 11 then return 30 end
-  return 31
-end
-local function valid_date(s)
-  if #s ~= 10 or s:sub(5, 5) ~= "-" or s:sub(8, 8) ~= "-" then return false end
-  if not (both_digits(s, 1) and both_digits(s, 3) and both_digits(s, 6) and both_digits(s, 9)) then return false end
-  local year = two(s, 1) * 100 + two(s, 3)
-  local month, day = two(s, 6), two(s, 9)
-  if month < 1 or month > 12 then return false end
-  return day >= 1 and day <= days_in_month(year, month)
-end
-local function valid_time(s)
-  if #s < 5 or s:sub(3, 3) ~= ":" then return false end
-  if not (both_digits(s, 1) and both_digits(s, 4)) then return false end
-  if two(s, 1) > 23 or two(s, 4) > 59 then return false end
-  if #s == 5 then return true end
-  if s:sub(6, 6) ~= ":" or #s < 8 then return false end
-  if not both_digits(s, 7) or two(s, 7) > 60 then return false end
-  if #s == 8 then return true end
-  if s:sub(9, 9) ~= "." or #s < 10 then return false end
-  return s:sub(10):match("^%d+$") ~= nil
-end
-local function valid_offset(s)
-  if #s ~= 6 or s:sub(4, 4) ~= ":" then return false end
-  if not (both_digits(s, 2) and both_digits(s, 5)) then return false end
-  return two(s, 2) <= 23 and two(s, 5) <= 59
-end
-local function classify_datetime(raw)
-  if #raw >= 3 and raw:sub(3, 3) == ":" then return valid_time(raw) and "local_time" or nil end
-  if #raw < 10 then return nil end
-  if not valid_date(raw:sub(1, 10)) then return nil end
-  if #raw == 10 then return "local_date" end
-  local sep = raw:sub(11, 11)
-  if sep ~= "T" and sep ~= "t" and sep ~= " " then return nil end
-  local rest = raw:sub(12)
-  local time_str, has_offset = rest, false
-  local last = rest:sub(-1)
-  if last == "Z" or last == "z" then
-    time_str = rest:sub(1, -2)
-    has_offset = true
-  elseif #rest >= 6 and (rest:sub(-6, -6) == "+" or rest:sub(-6, -6) == "-") and rest:sub(-3, -3) == ":" then
-    if not valid_offset(rest:sub(-6)) then return nil end
-    time_str = rest:sub(1, -7)
-    has_offset = true
-  end
-  if not valid_time(time_str) then return nil end
-  return has_offset and "offset_datetime" or "local_datetime"
-end
+-- RFC 3339, through the shared `fig.datetime`: fig takes a bare time with
+-- no date, and a time to the minute with no seconds, so both options are
+-- on.
+local DATETIME = { minute_precision = true, time_only = true }
 
 -- Literal-else-string: `{kind=…}` for a trimmed bare token.
 local function sniff_bare(token)
@@ -246,7 +193,7 @@ local function sniff_bare(token)
   if token == "true" or token == "false" then return { kind = "bool", text = token } end
   local n = sniff_number(token)
   if n then return { kind = n, text = token } end
-  local d = classify_datetime(token)
+  local d = DT.classify(token, DATETIME)
   if d then return { kind = "string", text = token, ext_kind = d } end
   return { kind = "string", text = token }
 end
@@ -514,7 +461,7 @@ local function decode_escape(s, i, at)
     local hex = s:sub(i + 3, i + 6)
     if not hex:match("^%x%x%x%x$") then fail(E.FigBadEscape, at) end
     local cp = tonumber(hex, 16)
-    if cp >= 0xD800 and cp <= 0xDFFF then fail(E.FigBadEscape, at) end
+    if fig.is_surrogate(cp) then fail(E.FigBadEscape, at) end
     return utf8.char(cp), i + 6
   end
   fail(E.FigBadEscape, at)
@@ -551,7 +498,7 @@ function P:scan_triple(start, q, dedent_and_escape)
       local cstart = i + 1
       local j = cstart
       while j < self.n and self:at(j) ~= 10 do j = j + 1 end
-      opener_comment = src:sub(cstart + 1, j):match("^[ \t\r]*(.-)[ \t\r]*$")
+      opener_comment = fig.trim_comment(src:sub(cstart + 1, j))
       i = j
       break
     end
@@ -849,7 +796,7 @@ function P:scan_bare_rest_of_line()
   if comment_start then
     local j = comment_start + 1
     while j < self.n and self:at(j) ~= 10 do j = j + 1 end
-    comment = self.src:sub(comment_start + 2, j):match("^[ \t\r]*(.-)[ \t\r]*$")
+    comment = fig.trim_comment(self.src:sub(comment_start + 2, j))
     line_end = j
   end
   self.pos = line_end
@@ -864,7 +811,7 @@ function P:scan_trailing_comment_only()
     local cs = self.pos + 1
     local j = cs
     while j < self.n and self:at(j) ~= 10 do j = j + 1 end
-    local c = self.src:sub(cs + 1, j):match("^[ \t\r]*(.-)[ \t\r]*$")
+    local c = fig.trim_comment(self.src:sub(cs + 1, j))
     self.pos = j
     return c
   end
@@ -877,7 +824,7 @@ function P:scan_flow_opener_comment()
   if i >= self.n or self:at(i) ~= 35 then return nil end
   local j = i + 1
   while j < self.n and self:at(j) ~= 10 do j = j + 1 end
-  return self.src:sub(i + 2, j):match("^[ \t\r]*(.-)[ \t\r]*$")
+  return fig.trim_comment(self.src:sub(i + 2, j))
 end
 
 local function sniff_to_node(text, span)
@@ -919,7 +866,7 @@ local function parse_char_literal(text)
     local hex = inner:match("^\\u{(%x+)}$")
     if not hex or #hex > 6 then return nil end
     local cp = tonumber(hex, 16)
-    if cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF) then return nil end
+    if cp > 0x10FFFF or fig.is_surrogate(cp) then return nil end
     return cp
   end
   return nil
@@ -957,7 +904,7 @@ function P:apply_known_type(type_name, text, span)
     if not cp then return nil end
     return new_node({ kind = "int", text = string.format("%d", cp), ext_kind = "char_literal" }, span)
   elseif type_name == "datetime" or type_name == "date" or type_name == "time" then
-    local k = classify_datetime(text)
+    local k = DT.classify(text, DATETIME)
     if not k then return nil end
     if type_name == "date" and k ~= "local_date" then return nil end
     if type_name == "time" and k ~= "local_time" then return nil end
@@ -1407,7 +1354,7 @@ function P:process_line(line_start)
     self:advance()
     local j = self.pos
     while j < self.n and self:at(j) ~= 10 do j = j + 1 end
-    local text = self.src:sub(self.pos + 1, j):match("^[ \t\r]*(.-)[ \t\r]*$")
+    local text = fig.trim_comment(self.src:sub(self.pos + 1, j))
     self.sections:comment(text, depth)
     self.pos = j
     self:skip_to_next_line()
@@ -1685,7 +1632,7 @@ function Pr:compute_inline_width(row)
   if k == "string" then
     local e = row.ext_kind
     if e then
-      if e == "offset_datetime" or e == "local_datetime" or e == "local_date" or e == "local_time" then return #row.text end
+      if DT.KINDS[e] then return #row.text end
       return nil
     end
     if row.text and row.text:find("\n", 1, true) then return nil end

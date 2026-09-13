@@ -1,10 +1,12 @@
 -- Apple property lists (the XML form), in Lua: the twin of fig's compiled
 -- `plist` format, row for row.
 --
--- `fig lang check lua-plist --against plist <files…>` holds this script to
--- the compiled parser's node table, and it is written against `fig lang
--- table -i plist`. What the compiled format accepts is stated in fig's
--- `src/languages/plist/parser.zig`, and this follows it:
+-- The contract is the format and the tree it makes: for every document the
+-- compiled `plist` reads, this script builds the same node table and
+-- prints the same bytes, and it refuses what the compiled format refuses —
+-- in words and at offsets of its own. `fig lang table -i plist` prints
+-- that table, and `fig lang check lua-plist --against plist <files…>` holds
+-- this script to it on any file. What the format is:
 --
 --   * `<plist [version="…"]>OBJECT</plist>`, or a bare OBJECT with no
 --     wrapper; an XML declaration, a DOCTYPE without an internal subset,
