@@ -361,6 +361,169 @@ fn json_edits_as_the_compiled_format_does() {
     assert_eq!(mine.source().unwrap(), "[1, 3, 4]\n");
 }
 
+/// One registration per process: a name can be registered once.
+fn lua_toml() -> Format {
+    static FORMAT: OnceLock<Format> = OnceLock::new();
+    *FORMAT.get_or_init(|| fig::language::register(script("toml.lua")).expect("registers")[0])
+}
+
+#[test]
+fn toml_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("toml.lua");
+    for (name, source, want) in fixtures("toml", "toml") {
+        let table = lang
+            .parse("lua-toml", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+            fig::helper::encode(&canonical(&got)),
+            fig::helper::encode(&canonical(&want)),
+        );
+    }
+}
+
+#[test]
+fn toml_registers_and_is_the_compiled_format_at_every_entry_point() {
+    let mine_fmt = lua_toml();
+    assert!(matches!(mine_fmt, Format::Runtime(_)));
+    assert_eq!(Format::by_name("lua-toml"), Some(mine_fmt));
+
+    for (name, source, _) in fixtures("toml", "toml") {
+        let mine = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let theirs = Document::parse(&source, Format::Toml).unwrap();
+        // The same tree, comments included: both print the same through
+        // the compiled printer and through the script's, and the script's
+        // printer is the compiled one's, byte for byte — sections, dotted
+        // demotions, wrapped arrays and all.
+        assert_eq!(
+            mine.serialize(Format::Toml).unwrap(),
+            theirs.serialize(Format::Toml).unwrap(),
+            "{name}: trees differ"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(mine_fmt).unwrap(),
+            "{name}: the script prints the two trees differently"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(Format::Toml).unwrap(),
+            "{name}: the script's printer differs from the compiled one"
+        );
+        // Compared as printed: a `nan` is a NaN, and NaN is not equal to
+        // itself.
+        assert_eq!(
+            format!("{:?}", mine.to_value().unwrap()),
+            format!("{:?}", theirs.to_value().unwrap())
+        );
+    }
+}
+
+#[test]
+fn toml_refuses_what_the_compiled_format_refuses_with_its_words_and_offset() {
+    // The compiled parser's messages, at the offsets the `fig` CLI reports
+    // for them (`fig get bad.toml -i toml`).
+    let mine = lua_toml();
+    const DUPLICATE: &str = "this key or table conflicts with one already defined; a TOML key or table may be defined only once";
+    const UNEXPECTED: &str =
+        "unexpected token here; check for a missing `=`, `.`, `,`, or closing `]`/`}`";
+    const NUMBER: &str = "not a valid TOML number; if this is text (a version, an id), quote it — TOML has no bare strings. Otherwise check the radix prefix, digit grouping (a single `_` between digits, none leading/trailing), and that there is no leading zero";
+    for (bad, message, offset) in [
+        (&b"a = 1\na = 2\n"[..], DUPLICATE, 6),
+        (b"[t]\n[t]\n", DUPLICATE, 5),
+        (b"[a.b]\n[a]\nb.c = 1\n", DUPLICATE, 10),
+        (
+            b"a = 1 b = 2\n",
+            "unexpected content after this line's value; each TOML statement must end its line (a `#` comment needs whitespace before it)",
+            6,
+        ),
+        (
+            b"a = \"unclosed\n",
+            "unclosed string; a single-line string cannot contain a literal newline — close the quote, or use a triple-quoted string (`\"\"\"`/`'''`) for multi-line text",
+            13,
+        ),
+        (
+            b"a = hello\n",
+            "TOML has no bare strings: a value that is not a number, boolean, date, array, or inline table must be quoted (`\"...\"`, or `'...'` for raw text)",
+            4,
+        ),
+        (b"a = 1.2.3\n", NUMBER, 4),
+        (b"a = 07\n", NUMBER, 4),
+        (b"a = 2024-13-01\n", "not a valid RFC 3339 date/time", 14),
+        (
+            b"a = \"\\q\"\n",
+            "invalid escape; basic strings support \\b \\t \\n \\f \\r \\\" \\\\ \\uXXXX \\UXXXXXXXX — use a literal string ('...') for raw text with backslashes",
+            8,
+        ),
+        (b"= 1\n", UNEXPECTED, 0),
+        (b"a = [1, 2\n", UNEXPECTED, 10),
+        (b"a = { b = 1\n", UNEXPECTED, 12),
+    ] {
+        assert!(
+            Document::parse(bad, Format::Toml).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                // Offset 0 is "unknown" at the C ABI, so it comes back as
+                // `None`: the one offset the binding cannot carry.
+                let want = if offset == 0 { None } else { Some(offset) };
+                assert_eq!(e.byte_offset, want, "{}", String::from_utf8_lossy(bad));
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn toml_edits_as_the_compiled_format_does() {
+    // The section format's whole editing surface: a value in a table, a key
+    // that creates a table, a table deleted and one renamed with every
+    // mention of its name, an array appended to, a comment placed — each
+    // through the script and through the compiled format, to the same bytes.
+    let mine_fmt = lua_toml();
+    let src = b"title = \"fig\"\nports = [80]\n\n[server]\nhost = \"h\"\n\n[server.tls]\non = true\n\n[[products]]\nname = \"a\"\n\n[[products]]\nname = \"b\"\n";
+    let mut mine = Editor::open(src, mine_fmt).unwrap();
+    let mut theirs = Editor::open(src, Format::Toml).unwrap();
+    for ed in [&mut mine, &mut theirs] {
+        ed.replace_value(&[Segment::Key("server"), Segment::Key("host")], "localhost")
+            .unwrap();
+        ed.set_value(
+            &[
+                Segment::Key("fresh"),
+                Segment::Key("deep"),
+                Segment::Key("key"),
+            ],
+            1i64,
+        )
+        .unwrap();
+        ed.append_value(&[Segment::Key("ports")], 443i64).unwrap();
+        ed.delete_container(&[Segment::Key("server"), Segment::Key("tls")])
+            .unwrap();
+        ed.rename_container(&[Segment::Key("server")], "srv")
+            .unwrap();
+        ed.add_leading_comment(&[Segment::Key("title")], "the name")
+            .unwrap();
+        ed.delete(&[
+            Segment::Key("products"),
+            Segment::Index(0),
+            Segment::Key("name"),
+        ])
+        .unwrap();
+    }
+    assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
+    let out = mine.source().unwrap();
+    assert!(out.contains("[srv]\nhost = \"localhost\""), "{out}");
+    assert!(!out.contains("tls"), "{out}");
+    assert!(out.contains("ports = [80, 443]"), "{out}");
+    assert!(out.contains("# the name\ntitle"), "{out}");
+}
+
 #[test]
 fn plist_parses_every_fixture_to_the_compiled_table() {
     let lang = script("plist.lua");

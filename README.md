@@ -25,12 +25,18 @@ lua-dotenv: registered (read edit serialize); every sample parsed, printed and r
 secrets.env: same table as `dotenv` (13 rows)
 ```
 
-Four scripts ship in `languages/`, each the twin of a format fig compiles
+Five scripts ship in `languages/`, each the twin of a format fig compiles
 in and held to it row for row:
 
 - `json.lua` — strict JSON, RFC 8259: the values, the escapes with
   surrogate pairs, the byte-order mark, no comments; the format everyone
   already knows, so the one to read first.
+- `toml.lua` — TOML 1.1, whole: `[tables]`, `[[arrays of tables]]`,
+  dotted keys, inline tables, every string and number form, datetimes.
+  A *section* format, so it is what a runtime language looks like when
+  it carries the regions and mentions the editor moves a table by, and
+  the compiled printer's layout rules, width budget and all; held to
+  the whole of toml-test, and its edits to the compiled format's bytes.
 - `dotenv.lua` — `.env` files: bash-identifier keys, an optional `export`,
   quoted and unquoted values, `#` comments, flat.
 - `plist.lua` — Apple property lists, the XML form: `dict`, `array`, typed
