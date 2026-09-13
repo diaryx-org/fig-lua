@@ -16,7 +16,9 @@
 -- same line as the last node completed is that node's trailing comment;
 -- any other waits, and becomes the leading comment of the next entry (on
 -- its key, by default) or, when a container closes with it still waiting,
--- a dangling comment of that container.
+-- a dangling comment of that container. That is the policy every format
+-- fig compiles in shares; `G.context(sc, opts)` — or `G.document{ comments
+-- = ... }` — takes the three refinements some of them add.
 local G = {}
 
 -- ── the context ───────────────────────────────────────────────────────────
@@ -24,15 +26,51 @@ local G = {}
 local Context = {}
 Context.__index = Context
 
---- A binding context over `sc`.
-function G.context(sc)
-  return setmetatable({ sc = sc, pending = {}, last = nil }, Context)
+local function is_container(n)
+  return n.kind == "mapping" or n.kind == "sequence"
+end
+
+--- A binding context over `sc`. `opts` refines what trails: `ends_line`
+--- (false) — a comment trails only when it is the last thing on its line,
+--- so a block comment with more after it on the line waits instead; `one`
+--- (false) — a node takes one trailing comment, a second on the same line
+--- waiting like any other; `closing_line` (false) — a container that spans
+--- lines takes the comment on its closing line as dangling rather than
+--- trailing.
+function G.context(sc, opts)
+  opts = opts or {}
+  return setmetatable({
+    sc = sc,
+    pending = {},
+    last = nil,
+    ends_line = opts.ends_line == true,
+    one = opts.one == true,
+    closing_line = opts.closing_line == true,
+  }, Context)
+end
+
+--- Whether only spaces and tabs lie between `at` and the line's end.
+function Context:rest_is_blank(at)
+  local src = self.sc.src
+  local i = at + 1
+  while i <= #src do
+    local b = src:byte(i)
+    if b ~= 32 and b ~= 9 then return b == 10 or b == 13 end
+    i = i + 1
+  end
+  return true
 end
 
 --- A comment `{s, e, text=, style=}` met in trivia.
 function Context:comment(c)
-  if self.last and self.sc:same_line(self.last.span[2], c[1]) then
-    self.last:comment("trailing", c.text, c.style)
+  local last = self.last
+  if last and self.sc:same_line(last.span[2], c[1]) and (not self.ends_line or self:rest_is_blank(c[2])) then
+    if self.closing_line and is_container(last) and not self.sc:same_line(last.span[1], last.span[2]) then
+      last:comment("dangling", c.text, c.style)
+    else
+      last:comment("trailing", c.text, c.style)
+    end
+    if self.one then self.last = nil end
   else
     self.pending[#self.pending + 1] = c
     self.last = nil
@@ -563,7 +601,7 @@ function G.document(opts)
     end
     local sc = fig.scanner(input)
     if opts.bom and sc:starts("\239\187\191") then sc.pos = 3 end
-    local ctx = G.context(sc)
+    local ctx = G.context(sc, opts.comments)
     if trivia then trivia(sc, ctx) end
     local r = root(sc, ctx)
     if r == nil then sc:fail(opts.missing or "no document here") end

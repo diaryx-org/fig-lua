@@ -107,8 +107,8 @@ pub mod script {
     //! `languages/nestedtext.lua`, `languages/plist.lua` and
     //! `languages/canonical.lua` in this repository
     //! are complete scripts; the `fig` global is
-    //! `src/prelude.lua`, and `src/grammar.lua` and `src/xml.lua` are the
-    //! modules.
+    //! `src/prelude.lua`, and `src/grammar.lua`, `src/xml.lua`,
+    //! `src/number.lua` and `src/datetime.lua` are the modules.
 }
 
 /// The `fig` global every script sees.
@@ -118,6 +118,8 @@ const PRELUDE: &str = include_str!("prelude.lua");
 const MODULES: &[(&str, &str)] = &[
     ("fig.grammar", include_str!("grammar.lua")),
     ("fig.xml", include_str!("xml.lua")),
+    ("fig.number", include_str!("number.lua")),
+    ("fig.datetime", include_str!("datetime.lua")),
 ];
 
 /// A format whose parser and printer are a Lua script.

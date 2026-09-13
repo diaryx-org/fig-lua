@@ -1,6 +1,7 @@
 -- The `fig` global a fig-lua script sees. Loaded before the script, once
--- per process; `require("fig.grammar")` and `require("fig.xml")` are the
--- two modules built on it.
+-- per process; `require("fig.grammar")`, `require("fig.xml")`,
+-- `require("fig.number")` and `require("fig.datetime")` are the modules
+-- built beside it.
 --
 -- Three layers, each written in terms of the one below:
 --
@@ -305,6 +306,83 @@ function fig.rows(root)
   return t
 end
 
+-- ── bytes and text ────────────────────────────────────────────────────────
+
+--- Whether `cp` is a UTF-16 surrogate, high or low: a codepoint no text
+--- can hold on its own.
+function fig.is_surrogate(cp)
+  return cp >= 0xD800 and cp <= 0xDFFF
+end
+
+--- The codepoint a `\uXXXX\uXXXX` surrogate pair spells, or nil when
+--- `hi` and `lo` are not a high surrogate followed by a low one.
+function fig.surrogate_pair(hi, lo)
+  if hi >= 0xD800 and hi <= 0xDBFF and lo >= 0xDC00 and lo <= 0xDFFF then
+    return 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+  end
+  return nil
+end
+
+--- A comment's text as the wire carries it: `raw` with the spaces, tabs
+--- and carriage returns at either end removed.
+function fig.trim_comment(raw)
+  return (raw:match("^[ \t\r]*(.-)[ \t\r]*$"))
+end
+
+-- ── the token cursor ──────────────────────────────────────────────────────
+-- A parser written over a token list rather than a grammar — one whose
+-- tokenizer runs first — walks the list with this: `peek`, `advance`, the
+-- text a token covers, and a failure at the token in hand.
+
+local Cursor = {}
+Cursor.__index = Cursor
+
+--- A cursor over `tokens` — each `{kind=, s=, e=}` over byte offsets, the
+--- last an end-of-input token the cursor never moves past — reading text
+--- through scanner `sc`.
+function fig.cursor(tokens, sc)
+  return setmetatable({ tokens = tokens, sc = sc, pos = 1 }, Cursor)
+end
+
+--- The token in hand.
+function Cursor:peek()
+  return self.tokens[self.pos]
+end
+
+--- The token `k` (1) past the one in hand, or the last.
+function Cursor:ahead(k)
+  return self.tokens[math.min(self.pos + (k or 1), #self.tokens)]
+end
+
+--- The token in hand, moving to the next unless it is the last.
+function Cursor:advance()
+  local t = self.tokens[self.pos]
+  if self.pos < #self.tokens then self.pos = self.pos + 1 end
+  return t
+end
+
+--- Whether the token in hand is of `kind`.
+function Cursor:at(kind)
+  return self.tokens[self.pos].kind == kind
+end
+
+--- The token in hand when it is of `kind`, moving past it; else nil.
+function Cursor:take(kind)
+  if self:at(kind) then return self:advance() end
+  return nil
+end
+
+--- The text `t` (the token in hand) covers.
+function Cursor:text(t)
+  t = t or self.tokens[self.pos]
+  return self.sc:slice(t.s, t.e)
+end
+
+--- `fig.fail` at the start of `t` (the token in hand).
+function Cursor:fail(message, t)
+  fig.fail(message, (t or self.tokens[self.pos]).s)
+end
+
 -- ── the scanner ───────────────────────────────────────────────────────────
 -- A cursor over the input whose `pos` is a 0-based byte offset, so every
 -- span it hands out is the wire's. Nothing here advances on a miss.
@@ -417,6 +495,22 @@ end
 --- Indent, write the arguments, end the line.
 function Writer:line(depth, ...)
   return self:indent(depth):put(...):nl()
+end
+
+--- Write `comments` (a row's `leading`, say) as full lines, each line of
+--- each comment's text on its own, trimmed, after `leader` and a space —
+--- `# text`, or the bare leader for an empty line — indented by `depth`
+--- (0). Answers whether anything was written.
+function Writer:comments(comments, leader, depth)
+  local wrote = false
+  for _, c in ipairs(comments) do
+    for line in (c.text .. "\n"):gmatch("(.-)\n") do
+      local t = line:match("^[ \t]*(.-)[ \t]*$")
+      self:indent(depth or 0):put(t == "" and leader or (leader .. " " .. t), "\n")
+      wrote = true
+    end
+  end
+  return wrote
 end
 
 function Writer:string()
