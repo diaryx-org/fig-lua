@@ -164,6 +164,23 @@ around it: `canonical.lua` runs its own `parse` over `G.context` with a
 the comma or looks ahead for the close. A rule is a function, and so is
 the context's policy.
 
+**Sections.** A format whose containers are opened by a header line and
+re-entered by another — INI, TOML, fig — is not a grammar of rules, and
+`ini.lua`, `toml.lua` and `fig.lua` state their headers by hand. What the
+three share is `G.sections(src)`: `S:open(parent, entry, kind)` puts the
+keyvalue in its parent and gives the container its first *region* (the
+whole line holding the key) and its first *mention* (the key, of kind
+`header` or `entry`); `S:reopen(node, span, kind)` adds one of each for
+a header that names it again; `S:region` and `S:mention` add one alone,
+for the header line an array-of-tables element shares or the segment a
+`[a.b]` passes through. `S:comment(text, depth)` is a comment waiting
+for its key, and `S:claim(node, slot, depth)` gives the waiting comments
+at that depth or deeper to a key (`leading`) or a closing container
+(`dangling`); `depth` is for a format whose lines have one, and the
+others leave it. What a header *means* — which containers it may
+re-enter, what its dots and brackets say, where the cursor goes — is
+each format's own, and stays in its parser.
+
 **XML.** `require("fig.xml")` is the XML shape — tags with or without
 attributes, text with entities and CDATA decoded, comments and processing
 instructions skipped — as rules: `X.tag`, `X.close(name)`,

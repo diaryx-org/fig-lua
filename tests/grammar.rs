@@ -74,3 +74,94 @@ fn the_readme_example_registers_prints_and_edits() {
     ed.insert_value(&[], "c", "3").unwrap();
     assert_eq!(ed.source().unwrap(), "a=one\n# two\nb=two # words\nc=3\n");
 }
+
+/// A section format small enough to read whole: `[name]` opens a section
+/// or re-enters one, `k=v` is an entry, `#` a comment, `>` in front of a
+/// line its depth. Every region, mention and comment comes from
+/// `G.sections`; only what a header means is the script's.
+const TINYSECTIONS: &str = r##"
+local G = require("fig.grammar")
+local M = { name = "tinysections", caps = { read = true }, dialects = { { name = "tinysections", extensions = { "tsec" } } } }
+function M.parse(_dialect, input)
+  local S = G.sections(input)
+  local root = fig.mapping({ 0, #input })
+  local current = root
+  local pos = 0
+  while pos < #input do
+    local nl = input:find("\n", pos + 1, true) or (#input + 1)
+    local line = input:sub(pos + 1, nl - 1)
+    local depth, body = #line:match("^>*"), line:gsub("^>+", "")
+    local at = pos + depth
+    if body:sub(1, 1) == "#" then
+      S:comment(body:sub(2), depth)
+    elseif body:sub(1, 1) == "[" then
+      local name = body:sub(2, -2)
+      local span = { at + 1, at + 1 + #name }
+      local e = root.by_key[name]
+      if e then
+        S:reopen(e.value, span, "header")
+        current = e.value
+      else
+        local key = fig.scalar("string", span, name)
+        S:claim(key, "leading")
+        current = S:open(root, fig.entry(key, fig.mapping(span)), "header")
+      end
+    elseif body ~= "" then
+      local eq = body:find("=", 1, true)
+      local key = fig.scalar("string", { at, at + eq - 1 }, body:sub(1, eq - 1))
+      S:claim(key, "leading", depth)
+      current:put(fig.entry(key, fig.scalar("string", { at + eq, at + #body }, body:sub(eq + 1))))
+    end
+    pos = nl
+  end
+  S:claim(current, "dangling")
+  return root
+end
+return M
+"##;
+
+#[test]
+fn sections_record_the_header_lines_the_names_and_the_waiting_comments() {
+    let lang = LuaLanguage::from_source("tinysections.lua", TINYSECTIONS).unwrap();
+    let table = lang
+        .parse(
+            "tinysections",
+            b"# about a\n[a]\nx=1\n[b]\n[a]\ny=2\n# end\n",
+        )
+        .unwrap();
+    let v = fig::helper::table_to_value(&table);
+    let regions = fig::helper::encode(v.get("regions").unwrap());
+    // `[a]` at 10, `[b]` at 18, `[a]` again at 22: each whole line, newline
+    // included, on the section it opened or re-entered — `a` is node 3
+    // (root, keyvalue, key, mapping), `b` node 12.
+    assert_eq!(
+        regions,
+        r#"[{"node":3,"start":10,"end":14},{"node":3,"start":22,"end":26},{"node":12,"start":18,"end":22}]"#
+    );
+    let mentions = fig::helper::encode(v.get("mentions").unwrap());
+    assert_eq!(
+        mentions,
+        r#"[{"node":3,"span":[11,12],"kind":"header"},{"node":3,"span":[23,24],"kind":"header"},{"node":12,"span":[19,20],"kind":"header"}]"#
+    );
+    let comments = fig::helper::encode(v.get("comments").unwrap());
+    assert_eq!(
+        comments,
+        r#"[{"node":2,"slot":"leading","style":"line","text":" about a"},{"node":3,"slot":"dangling","style":"line","text":" end"}]"#
+    );
+}
+
+#[test]
+fn sections_take_the_waiting_comments_by_depth() {
+    let lang = LuaLanguage::from_source("tinysections.lua", TINYSECTIONS).unwrap();
+    // A key at depth 1 claims only the comments at its depth or deeper;
+    // the shallower one keeps waiting, and dangles at the end.
+    let table = lang
+        .parse("tinysections", b"[s]\n#shallow\n>#deep\n>k=v\n")
+        .unwrap();
+    let v = fig::helper::table_to_value(&table);
+    let comments = fig::helper::encode(v.get("comments").unwrap());
+    assert_eq!(
+        comments,
+        r#"[{"node":3,"slot":"dangling","style":"line","text":"shallow"},{"node":5,"slot":"leading","style":"line","text":"deep"}]"#
+    );
+}

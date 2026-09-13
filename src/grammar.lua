@@ -8,7 +8,9 @@
 -- return spans; the fig-aware rules (`key`, `scalar`, `quoted`, `bare`,
 -- `entry`, `map`, `sequence`) return tree nodes, with the spans, the
 -- comment binding and the duplicate policy taken care of; `document` turns
--- a root rule into a `parse` function.
+-- a root rule into a `parse` function. `sections`, at the end, is not a
+-- rule: it is what a format of header lines — INI, TOML, fig — shares
+-- when its parser is written by hand.
 --
 -- Comments are bound by the context as trivia is skipped: a comment on the
 -- same line as the last node completed is that node's trailing comment;
@@ -574,6 +576,94 @@ function G.document(opts)
     ctx:flush(r, "dangling")
     return r
   end
+end
+
+-- ── sections ──────────────────────────────────────────────────────────────
+-- A section format — INI, TOML, fig — opens a container with a header
+-- line and may re-enter it with another, and the wire asks the same of
+-- each: a *region* for every line that opened or re-entered the
+-- container, the whole physical line, newline included; a *mention* for
+-- every place its name is written; and comments placed by where they
+-- fell — waiting until the next key claims them as leading, or dangling
+-- on the container that was open when its run ended. What a header
+-- *means* — which containers it may re-enter, what its dots and brackets
+-- say, where the cursor goes — differs in each, and stays in the parser.
+
+--- The whole physical line holding `at`, newline included: what a header
+--- line contributes to its container's regions.
+function G.line_region(src, at)
+  local s = at
+  while s > 0 and src:byte(s) ~= 10 do s = s - 1 end
+  local e = at
+  while e < #src and src:byte(e + 1) ~= 10 do e = e + 1 end
+  if e < #src then e = e + 1 end
+  return { s, e }
+end
+
+local Sections = {}
+Sections.__index = Sections
+
+--- A section context over `src`.
+function G.sections(src)
+  return setmetatable({ src = src, pending = {} }, Sections)
+end
+
+function Sections:line_region(at)
+  return G.line_region(self.src, at)
+end
+
+--- The line holding `at`, as a region of `node`.
+function Sections:region(node, at)
+  node.regions = node.regions or {}
+  node.regions[#node.regions + 1] = self:line_region(at)
+end
+
+--- `span`, where the name of `node` is written, as a mention of `kind`
+--- ("header" or "entry").
+function Sections:mention(node, span, kind)
+  node.mentions = node.mentions or {}
+  node.mentions[#node.mentions + 1] = { span = span, kind = kind }
+end
+
+--- Open a section: `entry`, a keyvalue over the container, goes into
+--- `parent`; the line holding its key is the container's first region,
+--- and the key its first mention, of `kind`. Returns the container.
+function Sections:open(parent, entry, kind)
+  parent:put(entry)
+  self:region(entry.value, entry.key.span[1])
+  self:mention(entry.value, entry.key.span, kind)
+  return entry.value
+end
+
+--- Re-enter `node` by a header that names it at `span`: another region,
+--- another mention, of `kind`.
+function Sections:reopen(node, span, kind)
+  self:region(node, span[1])
+  self:mention(node, span, kind)
+end
+
+--- A comment waiting for its key, met on a line at `depth` (0) — a format
+--- whose lines have no depth leaves it — of `style` ("line").
+function Sections:comment(text, depth, style)
+  self.pending[#self.pending + 1] = { text = text, depth = depth or 0, style = style or "line" }
+end
+
+--- Take the waiting comments from lines at `depth` (0: every one) or
+--- deeper, in order; the shallower ones keep waiting.
+function Sections:take(depth)
+  depth = depth or 0
+  local taken, kept = {}, {}
+  for _, c in ipairs(self.pending) do
+    if c.depth >= depth then taken[#taken + 1] = c else kept[#kept + 1] = c end
+  end
+  self.pending = kept
+  return taken
+end
+
+--- Give the waiting comments at `depth` or deeper to `node`, in `slot`
+--- ("leading" for a key, "dangling" for a container).
+function Sections:claim(node, slot, depth)
+  for _, c in ipairs(self:take(depth)) do node:comment(slot, c.text, c.style) end
 end
 
 return G

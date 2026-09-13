@@ -75,7 +75,9 @@ pub mod script {
     //! anywhere; any other error it raises is reported without an offset.
     //! Most scripts write neither by hand: `require("fig.grammar")` is a
     //! set of rules whose results are these nodes, and `G.document{...}`
-    //! is a `parse` function.
+    //! is a `parse` function. A format of header lines, whose parser is
+    //! its own, takes `G.sections(src)` for the regions, the mentions and
+    //! the waiting comments every section format records alike.
     //!
     //! `print(dialect, t, options)` receives a node table indexed by
     //! `fig.index` — every row has `id`, `children` (ids), `items` (rows),
