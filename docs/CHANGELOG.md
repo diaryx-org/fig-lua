@@ -29,9 +29,12 @@ elsewhere:
   held to its compiled sibling row for row, so a span that moves in
   `dotenv.lua` is a span that moves for whoever reads it through `fig`, even
   when the compiled format moved first and the script is only following.
-- **Anything that changes what the `fig` global does** — a field a row gains,
-  an id that renumbers, a helper that starts trimming. Every script ever
-  written runs against it.
+  What a twin says when it refuses a document is its own, and a reworded
+  message is not one of these.
+- **Anything that changes what the `fig` global or the modules beside it
+  do** — `fig.grammar`, `fig.xml`, `fig.number`, `fig.datetime`: a field a
+  row gains, an id that renumbers, a helper that starts trimming. Every
+  script ever written runs against them.
 
 ## Unreleased
 

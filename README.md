@@ -26,7 +26,12 @@ secrets.env: same table as `dotenv` (13 rows)
 ```
 
 Eleven scripts ship in `languages/`, each the twin of a format fig compiles
-in and held to it row for row:
+in. The format and the tree are the contract: a twin produces the same
+node table as the compiled format — every row, span, text and comment,
+`tests/fixtures/<format>/*.table.json` beside each fixture — and refuses
+every document the compiled format refuses, in words and at offsets of
+its own. How it gets there is its own too; none is written to follow
+the compiled parser step for step, and most are grammars:
 
 - `json.lua` — strict JSON, RFC 8259: the values, the escapes with
   surrogate pairs, the byte-order mark, no comments; the format everyone
@@ -93,7 +98,9 @@ in and held to it row for row:
 
 They are also what a new script is written against: each is a complete
 parser and printer, and `fig lang check <name> --against <format>` is how a
-twin is proven.
+twin is proven — the table, row for row. What a twin says when it refuses
+a document is not compared; `fig lang table -i <format>` prints what the
+table has to be.
 
 ## Install
 
@@ -218,6 +225,15 @@ attributes, text with entities and CDATA decoded, comments and processing
 instructions skipped — as rules: `X.tag`, `X.close(name)`,
 `X.text_element(name)`, `X.element{ name = handler }`, `X.trivia`.
 `plist.lua` is a `G.map` of `<key>`/value entries closed by `</dict>`.
+
+**Numbers and datetimes.** A number row's `text` is its lexeme, verbatim,
+and a printer writing it for another format asks `require("fig.number")`
+whether that format reads it back as the same number — `N.text(raw,
+N.JSON5)` is the lexeme when it is, decimal when it is not.
+`require("fig.datetime")` is the other typed scalar every format spells
+alike: `DT.classify(raw, opts)` answers `local_date`, `local_time`,
+`local_datetime` or `offset_datetime`, with `opts` for what the format
+allows. Both are the twins of the utilities fig's compiled formats share.
 
 **Printing.** `print(dialect, t, options)` gets the table back indexed:
 every row has `items` (its children), `leading`, `trailing`, `dangling`;
