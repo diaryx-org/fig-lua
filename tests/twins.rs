@@ -658,6 +658,255 @@ fn ini_edits_as_the_compiled_format_does() {
     assert!(out.contains("new = yes"), "{out}");
 }
 
+/// One registration per process: a name can be registered once.
+fn lua_fig() -> Format {
+    static FORMAT: OnceLock<Format> = OnceLock::new();
+    *FORMAT.get_or_init(|| fig::language::register(script("fig.lua")).expect("registers")[0])
+}
+
+#[test]
+fn fig_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("fig.lua");
+    for (name, source, want) in fixtures("fig", "figl") {
+        let table = lang
+            .parse("lua-fig", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+            fig::helper::encode(&canonical(&got)),
+            fig::helper::encode(&canonical(&want)),
+        );
+    }
+}
+
+#[test]
+fn fig_registers_and_is_the_compiled_format_at_every_entry_point() {
+    let mine_fmt = lua_fig();
+    assert!(matches!(mine_fmt, Format::Runtime(_)));
+    assert_eq!(Format::by_name("lua-fig"), Some(mine_fmt));
+
+    for (name, source, _) in fixtures("fig", "figl") {
+        let mine = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let theirs = Document::parse(&source, Format::Fig).unwrap();
+        // The same tree, comments included: both print the same through
+        // the compiled printer and through the script's, and the script's
+        // printer is the compiled one's, byte for byte — sections, dotted
+        // collapse, append groups, multi-line flow and all.
+        assert_eq!(
+            mine.serialize(Format::Fig).unwrap(),
+            theirs.serialize(Format::Fig).unwrap(),
+            "{name}: trees differ"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(mine_fmt).unwrap(),
+            "{name}: the script prints the two trees differently"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(Format::Fig).unwrap(),
+            "{name}: the script's printer differs from the compiled one"
+        );
+        // Compared as printed: `n: float = inf` is a NaN-class float on
+        // neither side, but a `nan` would be, and NaN is not equal to itself.
+        assert_eq!(
+            format!("{:?}", mine.to_value().unwrap()),
+            format!("{:?}", theirs.to_value().unwrap())
+        );
+    }
+}
+
+#[test]
+fn fig_refuses_what_the_compiled_format_refuses_with_its_words_and_offset() {
+    // The compiled parser's messages, at the offsets the `fig` CLI reports
+    // for them (`fig get bad.figl -i fig`).
+    let mine = lua_fig();
+    for (bad, message, offset) in [
+        (
+            &b"a\n>> b = 1\n"[..],
+            "this line skips a nesting level; depth may only grow one `>` at a time — add the missing parent line, or drop the extra `>`",
+            5,
+        ),
+        (
+            b"> a = 1\n",
+            "root keys carry zero markers; remove the `>` (a marker line needs a parent header above it)",
+            2,
+        ),
+        (
+            b">a = 1\n",
+            "put a space between the marker run and what follows: `> key`, not `>key`",
+            1,
+        ),
+        (
+            b"key: value\n",
+            "`:` introduces a type, not a value; write `key = value`, or `key: type = value`",
+            3,
+        ),
+        (
+            b"a = 1\na = 2\n",
+            "duplicate key: this key already has a value here; remove one of the definitions (re-enter a header only to add NEW keys)",
+            6,
+        ),
+        (
+            b"a\n",
+            "this container has no children; write an inline empty value instead: `key = {}` (map) or `key = []` (sequence)",
+            // Noticed when the frames close at the end of the input, so the
+            // offset is the input's end.
+            2,
+        ),
+        (
+            b"a = \"unclosed\n",
+            "unclosed string; add the closing quote (a single-line quote cannot span lines — use `'''` for multi-line)",
+            4,
+        ),
+        (
+            b"a = \"x\" y\n",
+            "this string ends at its matching quote, and the rest of the line is stray content; fig bare strings need no outer quotes — write `key = She said, \"Hey there!\"`, or escape the inner quotes: `\"She said, \\\"Hey there!\\\"\"`",
+            8,
+        ),
+        (
+            b"a = [1, 2\n",
+            "this `[`/`{` value never finds its matching close; close it, or quote the whole value to make it a string",
+            10,
+        ),
+        (
+            b"a = {x: 1}\n",
+            "a bare key cannot take a `:` pair; write `key = 1` (fig) or `\"key\": 1` (JSON)",
+            6,
+        ),
+        (
+            b"a: int = x\n",
+            "the value does not satisfy its `: type` annotation; fix the value, or drop/correct the annotation",
+            9,
+        ),
+        (
+            b"+\n",
+            "`+` has no `[]` append header to re-run; move it directly after its `a.b[]` group, or repeat the header",
+            1,
+        ),
+        (
+            b"a = { x = 1 }\na.y = 2\n",
+            "a value written inline as `[…]`/`{…}` is closed and cannot be extended later; write the block or header form if it needs to grow",
+            20,
+        ),
+        (
+            b"l\n> * 1\n> k = 2\n",
+            "a container holds either `key = value` entries or `*` elements, never both",
+            16,
+        ),
+        (
+            b"a = '''abc'''\n",
+            "a multiline string's content begins on the line AFTER the opening `'''`/`\"\"\"`; move this text down a line (only a `# comment` may share the opener line)",
+            7,
+        ),
+    ] {
+        assert!(
+            Document::parse(bad, Format::Fig).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                assert_eq!(
+                    e.byte_offset,
+                    Some(offset),
+                    "{}",
+                    String::from_utf8_lossy(bad)
+                );
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn fig_edits_as_the_compiled_format_does() {
+    // The section format's editing surface, fig-shaped: values under
+    // markers, a key that creates a container, a container deleted with
+    // its re-entered header lines gathered from its regions, an element
+    // appended, a comment placed — each through the script and through the
+    // compiled format, to the same bytes.
+    let mine_fmt = lua_fig();
+    let src = b"title = x\ndatabase\n> host = localhost\n> pool\n> > size = 10\n\nlogging\n> level = info\nlogging\n> file = a.log\ntags = [a, b]\n";
+    let mut mine = Editor::open(src, mine_fmt).unwrap();
+    let mut theirs = Editor::open(src, Format::Fig).unwrap();
+    for ed in [&mut mine, &mut theirs] {
+        ed.replace_value(
+            &[
+                Segment::Key("database"),
+                Segment::Key("pool"),
+                Segment::Key("size"),
+            ],
+            20i64,
+        )
+        .unwrap();
+        ed.set_value(
+            &[
+                Segment::Key("fresh"),
+                Segment::Key("deep"),
+                Segment::Key("key"),
+            ],
+            1i64,
+        )
+        .unwrap();
+        ed.append_value(&[Segment::Key("tags")], "c").unwrap();
+        ed.delete_container(&[Segment::Key("logging")]).unwrap();
+        ed.add_leading_comment(&[Segment::Key("title")], "the name")
+            .unwrap();
+    }
+    assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
+    let out = mine.source().unwrap();
+    assert!(out.contains("> > size = 20"), "{out}");
+    assert!(!out.contains("logging"), "{out}");
+    assert!(out.contains("tags = [a, b, c]"), "{out}");
+    assert!(out.contains("# the name\ntitle"), "{out}");
+
+    // A block map set as a value. The Rust editor spells a `Value` through
+    // the format it is editing, and asks the compiled fig printer for the
+    // flow form by name — a request the wire does not carry — so the
+    // compiled format splices `registry = { a = 1, b = 2 }` while the
+    // script's block spelling goes through its `tail` renderer and lands
+    // as a nested section. Two spellings of one tree.
+    let registry = Value::Map(vec![
+        (Value::Str("a".into()), Value::Int(1)),
+        (Value::Str("b".into()), Value::Int(2)),
+    ]);
+    mine.set_value(&[Segment::Key("registry")], registry.clone())
+        .unwrap();
+    theirs
+        .set_value(&[Segment::Key("registry")], registry)
+        .unwrap();
+    assert!(
+        mine.source()
+            .unwrap()
+            .contains("registry\n> a = 1\n> b = 2"),
+        "{}",
+        mine.source().unwrap()
+    );
+    assert!(
+        theirs
+            .source()
+            .unwrap()
+            .contains("registry = { a = 1, b = 2 }"),
+        "{}",
+        theirs.source().unwrap()
+    );
+    assert_eq!(
+        Document::parse(mine.source().unwrap().as_bytes(), mine_fmt)
+            .unwrap()
+            .to_value()
+            .unwrap(),
+        Document::parse(theirs.source().unwrap().as_bytes(), Format::Fig)
+            .unwrap()
+            .to_value()
+            .unwrap(),
+    );
+}
+
 #[test]
 fn plist_parses_every_fixture_to_the_compiled_table() {
     let lang = script("plist.lua");

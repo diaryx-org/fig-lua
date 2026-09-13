@@ -25,12 +25,20 @@ lua-dotenv: registered (read edit serialize); every sample parsed, printed and r
 secrets.env: same table as `dotenv` (13 rows)
 ```
 
-Six scripts ship in `languages/`, each the twin of a format fig compiles
+Seven scripts ship in `languages/`, each the twin of a format fig compiles
 in and held to it row for row:
 
 - `json.lua` — strict JSON, RFC 8259: the values, the escapes with
   surrogate pairs, the byte-order mark, no comments; the format everyone
   already knows, so the one to read first.
+- `fig.lua` — fig's own authoring dialect, `.figl`, whole: `>` marker
+  depth, section headers and `a.b[]`/`+` append headers, `*` elements,
+  dotted keys, `key: type = value` annotations kept as tags, flow values
+  with the balanced-then-trailing rule that leaves a markdown link bare,
+  multiline strings, comments placed by their own depth; and the `fig
+  fmt` house style — sections, hoisting, dotted collapse, append groups,
+  multi-line flow — byte for byte, plus the `tail` renderer that
+  re-prints a block value one marker level below its key.
 - `ini.lua` — `[section]` files: `key = value` lines, `;` and `#`
   comments, a reopened section merged into the first. The smaller section
   format, and the one to read beside `toml.lua` for what a section is.
