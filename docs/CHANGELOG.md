@@ -51,10 +51,13 @@ elsewhere:
 - **grammar** — `G.sections`, what a format of header lines records alike ([`a51c1b7`](https://github.com/diaryx-org/fig-lua/commit/a51c1b78f09a3dbdc397df13cfe37421b842644a))
 - **languages** — properties.lua, the twin of fig's compiled `.properties` ([`eaa6a60`](https://github.com/diaryx-org/fig-lua/commit/eaa6a609176cbd79255ad5613b505a9cfbda95a4))
 - **languages** — zon.lua, the twin of fig's compiled ZON ([`edd6159`](https://github.com/diaryx-org/fig-lua/commit/edd6159af01ef01422b724cc7e0c0f456f97c981))
+- **languages** — json5.lua, the twins of fig's compiled JSONC and JSON5 dialects ([`c60600d`](https://github.com/diaryx-org/fig-lua/commit/c60600d1a63e7f9eaacbb997980987fc1e0b6a32))
+- **languages** — nestedtext.lua, the twin of fig's compiled NestedText ([`5475902`](https://github.com/diaryx-org/fig-lua/commit/5475902d39f91f1265e08b3dd5b7bb8c52826d22))
 
 ### Fixed
 
 - **prelude** — a mapping key with no text is never a duplicate ([`99f43d4`](https://github.com/diaryx-org/fig-lua/commit/99f43d4ae386a28b2c59e720113803a7eeae9306))
+- **languages** — json.lua writes a number another format spelled as JSON reads it ([`faf0e9e`](https://github.com/diaryx-org/fig-lua/commit/faf0e9e694720dc18686e5d0a8532917e94bfaaa))
 
 ### Changed
 
