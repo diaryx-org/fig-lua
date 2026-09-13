@@ -1395,3 +1395,391 @@ fn zon_edits_as_the_compiled_format_did() {
         .unwrap();
     assert_eq!(ed.source().unwrap(), zon_recorded("edited.expected"));
 }
+
+/// One registration per process: a name can be registered once. The
+/// language serves two dialects, `lua-json5` first (its own name) and
+/// `lua-jsonc`; `register` answers one `Format` per dialect, in order.
+fn lua_json5_dialects() -> &'static [Format] {
+    static FORMATS: OnceLock<Vec<Format>> = OnceLock::new();
+    FORMATS.get_or_init(|| fig::language::register(script("json5.lua")).expect("registers"))
+}
+fn lua_json5() -> Format {
+    lua_json5_dialects()[0]
+}
+fn lua_jsonc() -> Format {
+    lua_json5_dialects()[1]
+}
+
+#[test]
+fn json5_and_jsonc_parse_every_fixture_to_the_compiled_table() {
+    let lang = script("json5.lua");
+    for (dialect, dir) in [("lua-json5", "json5"), ("lua-jsonc", "jsonc")] {
+        for (name, source, want) in fixtures(dir, dir) {
+            let table = lang
+                .parse(dialect, &source)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+            let got = fig::helper::table_to_value(&table);
+            assert_eq!(
+                canonical(&got),
+                canonical(&want),
+                "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+                fig::helper::encode(&canonical(&got)),
+                fig::helper::encode(&canonical(&want)),
+            );
+        }
+    }
+}
+
+#[test]
+fn json5_and_jsonc_register_and_are_the_compiled_dialects_at_every_entry_point() {
+    let (json5, jsonc) = (lua_json5(), lua_jsonc());
+    assert_eq!(Format::by_name("lua-json5"), Some(json5));
+    assert_eq!(Format::by_name("lua-jsonc"), Some(jsonc));
+    for (mine_fmt, theirs_fmt, dir) in [
+        (lua_json5(), Format::Json5, "json5"),
+        (lua_jsonc(), Format::Jsonc, "jsonc"),
+    ] {
+        assert!(matches!(mine_fmt, Format::Runtime(_)));
+        for (name, source, _) in fixtures(dir, dir) {
+            let mine = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let theirs = Document::parse(&source, theirs_fmt).unwrap();
+            assert_eq!(
+                mine.serialize(theirs_fmt).unwrap(),
+                theirs.serialize(theirs_fmt).unwrap(),
+                "{name}: trees differ"
+            );
+            assert_eq!(
+                mine.serialize(mine_fmt).unwrap(),
+                theirs.serialize(mine_fmt).unwrap(),
+                "{name}: the script prints the two trees differently"
+            );
+            assert_eq!(
+                mine.serialize(mine_fmt).unwrap(),
+                theirs.serialize(theirs_fmt).unwrap(),
+                "{name}: the script's printer differs from the compiled one"
+            );
+            assert_eq!(mine.to_value().unwrap(), theirs.to_value().unwrap());
+        }
+    }
+}
+
+#[test]
+fn json5_and_jsonc_refuse_what_the_compiled_dialects_refuse_with_their_words_and_offset() {
+    // The compiled parser's messages, at the offsets the `fig` CLI reports
+    // for them: a tokenizer error where its cursor stopped, a parser error
+    // at the start of the token being dispatched — the input's length for
+    // a document that ended early.
+    const UNEXPECTED: &str =
+        "unexpected token here; check for a missing comma, colon, key, or closing bracket/brace";
+    const ENDED: &str = "the document ended before this value/token was complete";
+    const UNCLOSED: &str = "unclosed string; a JSON string cannot span multiple lines — add the closing quote, or escape the newline as `\\n`";
+    for (mine, theirs, bad, message, offset) in [
+        (
+            lua_jsonc(),
+            Format::Jsonc,
+            &b"{\"a\": true, }"[..],
+            UNEXPECTED,
+            12,
+        ),
+        (lua_jsonc(), Format::Jsonc, b"// c", UNEXPECTED, 4),
+        (
+            lua_jsonc(),
+            Format::Jsonc,
+            b"/* unclosed",
+            "unclosed block comment; add the closing `*/`",
+            10,
+        ),
+        (
+            lua_jsonc(),
+            Format::Jsonc,
+            b"{\"a\": /x 1}",
+            "a `/` here must start a `//` or `/* */` comment, and strict JSON has no comments at all — use a .jsonc/.json5 file, or remove it",
+            6,
+        ),
+        (lua_jsonc(), Format::Jsonc, b"{ a: 1 }", UNEXPECTED, 2),
+        (lua_jsonc(), Format::Jsonc, b"[1, 2,]", UNEXPECTED, 6),
+        (lua_jsonc(), Format::Jsonc, b"\"\\u12g4\"", UNEXPECTED, 5),
+        (lua_jsonc(), Format::Jsonc, b"{\"a\":1} x", UNEXPECTED, 8),
+        (lua_jsonc(), Format::Jsonc, b"", UNEXPECTED, 0),
+        (lua_json5(), Format::Json5, b"{ a: 0x }", UNEXPECTED, 7),
+        (
+            lua_json5(),
+            Format::Json5,
+            b"{ a: 012 }",
+            "a number cannot have a leading zero; write the digits without the padding, or quote it as a string to keep the padding (e.g. a zip code)",
+            6,
+        ),
+        (lua_json5(), Format::Json5, b"{ a: . }", UNEXPECTED, 6),
+        (lua_json5(), Format::Json5, b"{ a: 1e }", ENDED, 7),
+        (lua_json5(), Format::Json5, b"{ a: '\\x4' }", UNCLOSED, 5),
+        (lua_json5(), Format::Json5, b"{ a: foo }", UNEXPECTED, 5),
+        (lua_json5(), Format::Json5, b"[1,,]", UNEXPECTED, 3),
+    ] {
+        assert!(
+            Document::parse(bad, theirs).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                // Offset 0 is "unknown" at the C ABI, so it comes back as
+                // `None`: the one offset the binding cannot carry.
+                let want = if offset == 0 { None } else { Some(offset) };
+                assert_eq!(e.byte_offset, want, "{}", String::from_utf8_lossy(bad));
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn json5_and_jsonc_edit_as_the_compiled_dialects_do() {
+    // The editing surface of a flow format with comments: a value
+    // replaced beside its trailing comment, a key inserted into a
+    // multi-line object and a one-line one, an entry deleted with its
+    // comment, a comment placed. JSON5's bare keys stay bare; a new key is
+    // spelled quoted in both.
+    for (mine_fmt, theirs_fmt) in [(lua_json5(), Format::Json5), (lua_jsonc(), Format::Jsonc)] {
+        let src = b"// top\n{ // head\n  \"root\": 1, // t\n  \"server\": {\n    \"host\": \"h\",\n    \"tags\": [\"a\", \"b\"]\n  },\n  \"list\": [1, 2, 3],\n  /* lead */\n  \"flat\": {\"a\": 1, \"b\": 2}\n  // dangle\n}\n";
+        let mut mine = Editor::open(src, mine_fmt).unwrap();
+        let mut theirs = Editor::open(src, theirs_fmt).unwrap();
+        for ed in [&mut mine, &mut theirs] {
+            ed.replace_value(&[Segment::Key("server"), Segment::Key("host")], "h2")
+                .unwrap();
+            ed.insert_value(&[Segment::Key("server")], "new", true)
+                .unwrap();
+            ed.set_value(&[Segment::Key("root")], 2i64).unwrap();
+            ed.replace_value(&[Segment::Key("list"), Segment::Index(1)], 9i64)
+                .unwrap();
+            ed.delete(&[Segment::Key("flat"), Segment::Key("a")])
+                .unwrap();
+            ed.add_leading_comment(&[Segment::Key("list")], "the list")
+                .unwrap();
+            ed.delete(&[Segment::Key("server"), Segment::Key("tags")])
+                .unwrap();
+        }
+        assert_eq!(mine.source().unwrap(), theirs.source().unwrap());
+        let out = mine.source().unwrap();
+        assert!(out.contains("\"host\": \"h2\""), "{out}");
+        assert!(out.contains("\"new\": true"), "{out}");
+        assert!(out.contains("\"flat\": {\"b\": 2}"), "{out}");
+        assert!(out.contains("// the list\n  \"list\": [1, 9, 3]"), "{out}");
+        assert!(!out.contains("tags"), "{out}");
+        assert!(out.contains("\"root\": 2, // t"), "{out}");
+    }
+}
+
+/// One registration per process: a name can be registered once.
+fn lua_nestedtext() -> Format {
+    static FORMAT: OnceLock<Format> = OnceLock::new();
+    *FORMAT.get_or_init(|| fig::language::register(script("nestedtext.lua")).expect("registers")[0])
+}
+
+#[test]
+fn nestedtext_parses_every_fixture_to_the_compiled_table() {
+    let lang = script("nestedtext.lua");
+    for (name, source, want) in fixtures("nestedtext", "nt") {
+        let table = lang
+            .parse("lua-nestedtext", &source)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        let got = fig::helper::table_to_value(&table);
+        assert_eq!(
+            canonical(&got),
+            canonical(&want),
+            "{name}: the script's table differs from the compiled one\n  got:  {}\n  want: {}",
+            fig::helper::encode(&canonical(&got)),
+            fig::helper::encode(&canonical(&want)),
+        );
+    }
+}
+
+#[test]
+fn nestedtext_registers_and_is_the_compiled_format_at_every_entry_point() {
+    let mine_fmt = lua_nestedtext();
+    assert!(matches!(mine_fmt, Format::Runtime(_)));
+    assert_eq!(Format::by_name("lua-nestedtext"), Some(mine_fmt));
+
+    for (name, source, _) in fixtures("nestedtext", "nt") {
+        let mine = Document::parse(&source, mine_fmt).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let theirs = Document::parse(&source, Format::Nestedtext).unwrap();
+        assert_eq!(
+            mine.serialize(Format::Nestedtext).unwrap(),
+            theirs.serialize(Format::Nestedtext).unwrap(),
+            "{name}: trees differ"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(mine_fmt).unwrap(),
+            "{name}: the script prints the two trees differently"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(Format::Nestedtext).unwrap(),
+            "{name}: the script's printer differs from the compiled one"
+        );
+        assert_eq!(mine.to_value().unwrap(), theirs.to_value().unwrap());
+    }
+}
+
+#[test]
+fn nestedtext_refuses_what_the_compiled_format_refuses_with_its_words_and_offset() {
+    // The compiled parser's messages, at the offsets the `fig` CLI reports
+    // for them: a line's start for a line that is wrong, the cursor for an
+    // inline value, the input's start (which the binding reads as no
+    // offset) for a duplicate key.
+    let mine = lua_nestedtext();
+    for (bad, message, offset) in [
+        (
+            &b"k:v"[..],
+            "this line is not a valid dictionary item, list item, string item, or comment",
+            0,
+        ),
+        (b"  a: 1", "top-level content must start in column 1", 0),
+        (
+            b"a: 1\n  b: 2",
+            "this line's indentation does not match any enclosing block (partial dedent)",
+            5,
+        ),
+        (b"- a\nb: 1", "expected a list item (`- value`) here", 4),
+        (
+            b"a: 1\na: 2",
+            "this key is already defined in this mapping",
+            0,
+        ),
+        (b"{a:0,}", "expected a value here", 5),
+        (b"[a", "this line ended without a closing `}`/`]`", 2),
+        (b"{a}", "expected `:` after this inline dictionary key", 2),
+        (
+            b"{a: b} x",
+            "unexpected content after the closing `}`/`]`",
+            7,
+        ),
+        (
+            b"[a, b]\nc: 1",
+            "unexpected content after the document's value",
+            7,
+        ),
+        (
+            b"a:\n  \xc2\xa0b: 1",
+            "indentation must use plain spaces; a tab or other whitespace character is not allowed here",
+            3,
+        ),
+        (
+            b": k\n",
+            "a multiline key requires a value on a more-indented line",
+            4,
+        ),
+        (
+            b": k\nv: 1\n",
+            "the value of a multiline key must be on a more-indented line",
+            4,
+        ),
+        (
+            b"a:\n    b: 1\n    - y\n",
+            "expected a dictionary item (`key: value` or a `: multiline key` line) here",
+            12,
+        ),
+        (
+            b"a:\n    > x\n    - y\n",
+            "this line's indentation does not match any enclosing block (partial dedent)",
+            11,
+        ),
+        (
+            b"[a, {b}]",
+            "expected `:` after this inline dictionary key",
+            6,
+        ),
+        (b"{a: b]", "expected `,` or a closing `}`/`]` here", 5),
+    ] {
+        assert!(
+            Document::parse(bad, Format::Nestedtext).is_err(),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+        match Document::parse(bad, mine) {
+            Err(fig::Error::Parse(e)) => {
+                assert_eq!(e.message, message, "{}", String::from_utf8_lossy(bad));
+                let want = if offset == 0 { None } else { Some(offset) };
+                assert_eq!(e.byte_offset, want, "{}", String::from_utf8_lossy(bad));
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn nestedtext_renders_as_the_compiled_editor_helper_does() {
+    // The four renderers, by the rules `editor_helper.zig` follows. The
+    // Rust editor is not driven here: it spells a scalar through the
+    // printer, which for NestedText is a `>` block that the tail renderer
+    // then blocks again (fig's `docs/tasks/rust-editor-spells-a-nestedtext-value-through-the-printer.md`);
+    // the twin's edits are held to the compiled format's bytes through the
+    // `fig` CLI instead, which hands the editor plain text.
+    let lang = script("nestedtext.lua");
+    let render = |which: Renderer,
+                  indent: &str,
+                  key: &str,
+                  value: &str,
+                  old_key: &str|
+     -> Result<String, String> {
+        let args = RenderArgs {
+            dialect: "lua-nestedtext",
+            indent: indent.as_bytes(),
+            key: key.as_bytes(),
+            value: value.as_bytes(),
+            literal: Literal::String,
+            old_key: old_key.as_bytes(),
+        };
+        lang.render(which, args)
+            .map(|b| String::from_utf8(b).unwrap())
+            .map_err(|e| e.message)
+    };
+    assert_eq!(render(Renderer::Entry, "", "b", "2", "").unwrap(), "b: 2");
+    assert_eq!(
+        render(Renderer::Entry, "    ", "b", "", "").unwrap(),
+        "b:\n        >"
+    );
+    assert_eq!(
+        render(Renderer::Entry, "", "b", "line1\nline2", "").unwrap(),
+        "b:\n    > line1\n    > line2"
+    );
+    assert_eq!(
+        render(Renderer::Entry, "", "- looks like a list tag", "v", "").unwrap(),
+        ": - looks like a list tag\n    > v"
+    );
+    assert_eq!(render(Renderer::Item, "", "", "x", "").unwrap(), "- x");
+    assert_eq!(
+        render(Renderer::Item, "  ", "", "a\nb", "").unwrap(),
+        "-\n      > a\n      > b"
+    );
+    assert_eq!(
+        render(Renderer::Tail, "", "name", "fig", "").unwrap(),
+        ": fig"
+    );
+    assert_eq!(
+        render(Renderer::Tail, "", "name", "l1\nl2", "").unwrap(),
+        ":\n    > l1\n    > l2"
+    );
+    assert_eq!(
+        render(Renderer::Tail, "", ": key 1\n: spread", "v", "").unwrap(),
+        "\n    > v"
+    );
+    assert_eq!(
+        render(Renderer::Tail, "", "", "hi\n\nthere", "").unwrap(),
+        "> hi\n>\n> there"
+    );
+    assert_eq!(
+        render(Renderer::Key, "", "lang", "", "name").unwrap(),
+        "lang"
+    );
+    assert_eq!(
+        render(Renderer::Key, "", "plain", "", ": multi\n: line").unwrap(),
+        "plain:"
+    );
+    assert_eq!(
+        render(Renderer::Key, "  ", "a\nb", "", ": was").unwrap(),
+        "  : a\n  : b"
+    );
+    assert!(render(Renderer::Key, "", "- tag", "", "plain").is_err());
+}

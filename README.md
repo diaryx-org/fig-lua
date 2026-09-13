@@ -25,12 +25,19 @@ lua-dotenv: registered (read edit serialize); every sample parsed, printed and r
 secrets.env: same table as `dotenv` (13 rows)
 ```
 
-Nine scripts ship in `languages/`, each the twin of a format fig compiles
+Eleven scripts ship in `languages/`, each the twin of a format fig compiles
 in and held to it row for row:
 
 - `json.lua` — strict JSON, RFC 8259: the values, the escapes with
   surrogate pairs, the byte-order mark, no comments; the format everyone
   already knows, so the one to read first.
+- `json5.lua` — JSONC and JSON5, two dialects from one script (`lua-json5`
+  and `lua-jsonc`), as the compiled JSON module is one parser with a
+  dialect switch: `//` and `/* */` comments bound the way the compiled
+  parser binds them, by the tokens around each one; and JSON5's unquoted
+  keys, single quotes, trailing commas, `Infinity`/`NaN`, hex and bare
+  dots. Written as the compiled state machine rather than as a grammar,
+  because the comments are what make these dialects.
 - `fig.lua` — fig's own authoring dialect, `.figl`, whole: `>` marker
   depth, section headers and `a.b[]`/`+` append headers, `*` elements,
   dotted keys, `key: type = value` annotations kept as tags, flow values
@@ -60,6 +67,10 @@ in and held to it row for row:
 - `properties.lua` — Java `.properties`: `=`, `:` or a space between key
   and value, backslash escapes on both, `\uXXXX`, line continuations,
   `#` and `!` comments, flat.
+- `nestedtext.lua` — NestedText: indentation-nested dicts, lists and `>`
+  string blocks, multiline `: ` keys, one-line inline `{…}`/`[…]`, every
+  scalar a literal string; and the four renderers the compiled editor
+  spells its edits with — an entry, an item, a value's tail, a key.
 - `plist.lua` — Apple property lists, the XML form: `dict`, `array`, typed
   scalars, `date` and `data`; and the two fragment renderers that spell an
   edited value as a typed element and an entry as `<key>` over it.
