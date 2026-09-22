@@ -23,8 +23,9 @@
 --
 -- The compiled parser keeps no comments (its editor works on the `<!-- -->`
 -- pairs in the source), so neither does this one. The compiled format
--- declares two fragment renderers — how a value spells as a typed element,
--- and an entry as `<key>k</key>` over the value — and they are here too.
+-- declares three fragment renderers — how a value spells as a typed
+-- element, an entry as `<key>k</key>` over the value, and a renamed key as
+-- its whole `<key>` element — and they are here too.
 -- Spans are byte offsets, 0-based, `[start, end)`.
 --
 -- The XML shape — tags, text, CDATA, what is skipped, and how each is
@@ -60,11 +61,17 @@ M.dialects = {
 M.samples = {
   '<plist version="1.0"><dict><key>a</key><string>b</string><key>n</key><integer>1</integer><key>l</key><array><true/><false/></array></dict></plist>\n',
 }
-M.renderers = { "value", "entry" }
+M.renderers = { "value", "entry", "key" }
 
 local UNEXPECTED = X.messages.unexpected
 
 -- ── text ──────────────────────────────────────────────────────────────────
+
+local function lines_of(s)
+  local out = {}
+  for line in (s .. "\n"):gmatch("(.-)\n") do out[#out + 1] = line end
+  return out
+end
 
 local function trim(s) return (s:gsub("^[ \t\r\n]+", ""):gsub("[ \t\r\n]+$", "")) end
 
@@ -228,7 +235,9 @@ M.parse = G.document({
 -- ── the printer ───────────────────────────────────────────────────────────
 -- The compiled printer's layout: the XML declaration, the DOCTYPE, a
 -- `<plist version="1.0">` wrapper, and one element per line indented by
--- `options.indent` per depth; `<dict/>` and `<array/>` when empty.
+-- `options.indent` per depth; `<dict/>` and `<array/>` when empty. Splice
+-- text (`options.splice`) is the root as its bare element, with no header
+-- and no wrapper.
 
 local function text_element(tag, text)
   return "<" .. tag .. ">" .. X.escape(text) .. "</" .. tag .. ">"
@@ -280,8 +289,11 @@ end
 function M.print(_dialect, t, options)
   local root_row = t.byid(0)
   local w = fig.writer(options)
-  if fig.is_scalar(root_row.kind) then
-    -- A fragment: the scalar as its typed element, standing alone.
+  if (options and options.splice) or fig.is_scalar(root_row.kind) then
+    -- Splice text, or a scalar fragment: the bare element with no
+    -- declaration, DOCTYPE or `<plist>` wrapper, a container's lines at the
+    -- top level — the compiled `printSplice`. What the editor splices, and
+    -- what `render_value` takes as an element already spelled.
     write_value(w, root_row, 1)
     return w:string()
   end
@@ -316,11 +328,25 @@ local function render_value(value_text, literal)
   return text_element("string", t)
 end
 
+-- An entry: `<key>k</key>`, then the value at the same indent. A value that
+-- spans lines — a `<dict>` or `<array>` spliced as the printer spells it,
+-- its lines at the top level — has every further non-empty line moved
+-- under `indent` too, so it lands at the entry's depth.
+local function render_entry(indent, key, value)
+  local out = { "<key>" .. X.escape(key) .. "</key>\n" .. indent }
+  for i, line in ipairs(lines_of(value)) do
+    if i > 1 then out[#out + 1] = "\n" .. (line == "" and "" or indent) end
+    out[#out + 1] = line
+  end
+  return table.concat(out)
+end
+
 function M.render(which, args)
   if which == "value" then return render_value(args.value, args.literal or "string") end
-  if which == "entry" then
-    return "<key>" .. X.escape(args.key) .. "</key>\n" .. args.indent .. args.value
-  end
+  if which == "entry" then return render_entry(args.indent, args.key, args.value) end
+  -- A renamed key: a key's span is its whole `<key>…</key>` element, so the
+  -- new name is spelled and escaped rather than spliced bare over the tags.
+  if which == "key" then return "<key>" .. X.escape(args.key) .. "</key>" end
   error("no renderer `" .. which .. "`", 0)
 end
 

@@ -390,8 +390,16 @@ end
 -- otherwise, `- ` items likewise, a key that would not read back as one
 -- spelled as `: ` lines with its value always nested; comments as `#`
 -- lines — leading above the item, a trailing one on its own line after
--- it, dangling at a container's end. A null root prints nothing; a scalar
--- root is a `>` block.
+-- it, dangling at a container's end. An empty container has no block
+-- spelling — `key:` over nothing reads back as the empty string — so it
+-- is its inline `{}` or `[]` on a line of its own, at the root as well.
+-- A null root prints nothing; a scalar root is a `>` block.
+--
+-- Splice text (`options.splice`) is what follows `key:` or `-` in place,
+-- the compiled `printSplice`: a one-line scalar is its plain text; a
+-- container, or a string with a line break, is a newline and then its
+-- nested block at depth 0, which the renderers re-indent under the key;
+-- a null is printed as a document.
 
 local INDENT = "    "
 
@@ -441,6 +449,11 @@ end
 
 function Pr:container(row, depth)
   local dict = row.kind == "mapping"
+  if #row.items == 0 then
+    self.w:comments(row.dangling, "#", depth)
+    self.w:indent(depth):put(dict and "{}" or "[]", "\n")
+    return
+  end
   for _, item in ipairs(row.items) do
     local value = dict and item.value or item
     self.w:comments((dict and item.key or item).leading, "#", depth)
@@ -463,16 +476,21 @@ function Pr:container(row, depth)
   self.w:comments(row.dangling, "#", depth)
 end
 
-function M.print(_dialect, t, _options)
+function M.print(_dialect, t, options)
   local w = fig.writer({ indent = #INDENT })
   local p = setmetatable({ w = w }, Pr)
   local root = t.byid(0)
+  local splice = options ~= nil and options.splice == true
   if root.kind == "null" then
     return ""
   elseif root.kind == "mapping" or root.kind == "sequence" then
+    if splice then w:put("\n") end
     p:container(root, 0)
   else
-    p:tagged_lines(">", 0, scalar_text(root))
+    local text = scalar_text(root)
+    if splice and not text:find("\n", 1, true) then return text end
+    if splice then w:put("\n") end
+    p:tagged_lines(">", 0, text)
   end
   return w:string()
 end
@@ -480,7 +498,11 @@ end
 -- ── the renderers ─────────────────────────────────────────────────────────
 -- What the editor splices. `args.indent` is the line's indentation; a
 -- value that is empty or has a line break goes under its key as a `>`
--- block one level in, a single line rides the key's line.
+-- block one level in, a single line rides the key's line — unless it is
+-- a nested block (`nested_block`): a line break and then lines that read
+-- as NestedText on their own, which is how splice text spells a container
+-- or a multi-line string. Those lines are re-indented under the key as
+-- they stand.
 
 -- Each line of `text` after `tag` — a bare tag for an empty line — joined
 -- with `sep`.
@@ -492,7 +514,29 @@ local function tagged(text, tag, sep)
   return table.concat(parts, sep)
 end
 
+-- The nested block `text` spells, when it spells one: text that opens with
+-- a line break and whose rest, trailing line breaks trimmed, parses as
+-- NestedText with a value that is not null — returned without the leading
+-- and trailing breaks. Otherwise nil, and `text` is a string: an argument
+-- means structure only if it starts with a line break AND the rest is
+-- NestedText.
+local function nested_block(text)
+  if #text < 2 or text:sub(1, 1) ~= "\n" then return nil end
+  local block = (text:sub(2):gsub("\n+$", ""))
+  if block == "" then return nil end
+  local ok, root = pcall(M.parse, "lua-nestedtext", block)
+  if not ok or root == nil or root.kind == "null" then return nil end
+  return block
+end
+
 local function value_tail(out, child_indent, text, force_nested)
+  local block = nested_block(text)
+  if block then
+    for _, line in ipairs(lines_of(block)) do
+      out[#out + 1] = "\n" .. (line == "" and "" or child_indent) .. line
+    end
+    return
+  end
   if not force_nested and text ~= "" and not text:find("\n", 1, true) then
     out[#out + 1] = " " .. text
   else
@@ -521,7 +565,9 @@ function M.render(which, args)
     value_tail(out, child, args.value, false)
   elseif which == "tail" then
     if args.key == "" then
-      out[#out + 1] = tagged(args.value, ">", "\n")
+      -- The document root: a nested block as it stands, at column 0, or
+      -- else a `>` block — a bare scalar line has no grammar at the top.
+      out[#out + 1] = nested_block(args.value) or tagged(args.value, ">", "\n")
     else
       local multiline = is_multiline_key_text(args.key)
       if not multiline then out[#out + 1] = ":" end

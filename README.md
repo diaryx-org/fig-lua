@@ -86,8 +86,9 @@ the compiled parser step for step, and most are grammars:
   scalar a literal string; and the four renderers the compiled editor
   spells its edits with — an entry, an item, a value's tail, a key.
 - `plist.lua` — Apple property lists, the XML form: `dict`, `array`, typed
-  scalars, `date` and `data`; and the two fragment renderers that spell an
-  edited value as a typed element and an entry as `<key>` over it.
+  scalars, `date` and `data`; and the three fragment renderers that spell
+  an edited value as a typed element, an entry as `<key>` over it, and a
+  renamed key as its whole `<key>` element.
 - `canonical.lua` — fig's canonical form, the tree spelled with nothing
   added: flow containers, JSON strings, numbers with their kind pinned,
   extended scalars, anchors, tags and aliases, keys that are any node,
@@ -237,8 +238,13 @@ allows. Both are the twins of the utilities fig's compiled formats share.
 every row has `items` (its children), `leading`, `trailing`, `dangling`;
 a keyvalue has `key` and `value`; `t.byid(id)` finds one. `fig.writer(options)`
 is a buffer that writes nothing for `nl()` and `indent(depth)` when
-`pretty` is off. A table whose root is a scalar is a fragment the editor
-will splice: spell it as the scalar stands alone.
+`pretty` is off. A table whose root is a scalar is a fragment: spell it
+as the scalar stands alone. `options.splice` is `true` when fig wants the
+value as the editor splices it into a document — every value a binding's
+editor hands it — rather than as a document of its own: a format whose
+document wraps its root (`plist.lua`) or spells a root differently from
+the same value in place (`nestedtext.lua`) writes it as it stands in
+place, and every other prints the same either way.
 
 **Editing** needs no code: fig's splice engine writes an edit from
 `M.syntax`. A format whose fragments cannot be spelled from constants

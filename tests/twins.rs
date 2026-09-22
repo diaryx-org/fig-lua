@@ -761,10 +761,10 @@ fn plist_registers_and_renders_typed_values() {
     // plist is not in fig's default feature set, so the compiled sibling is
     // not here to compare against in-process; `fig lang check lua-plist
     // --against plist` is that comparison, and the CLI is where the editor
-    // is driven with bare text (the Rust editor spells a key through the
-    // printer, which for plist is not the key — a task in fig). What is
-    // checked here is the harness, the printer, and the two renderers by
-    // the rules the compiled ones follow.
+    // is driven with bare text. What is checked here is the harness, the
+    // printer, and the three renderers by the rules the compiled ones
+    // follow; `tests/splice.rs` drives the Rust editor, whose values are
+    // splice text.
     let lang = script("plist.lua");
     // The value renderer spells the kind fig's bare-literal rules gave the
     // text — `literal` — and decides none itself.
@@ -820,6 +820,22 @@ fn plist_registers_and_renders_typed_values() {
     assert_eq!(
         render(Renderer::Entry, "a&b", "<true/>", Literal::String),
         "<key>a&amp;b</key>\n  <true/>"
+    );
+    // A value over several lines lands under the entry's indent, a blank
+    // line left bare.
+    assert_eq!(
+        render(
+            Renderer::Entry,
+            "d",
+            "<dict>\n  <key>x</key>\n\n  <true/>\n</dict>",
+            Literal::String
+        ),
+        "<key>d</key>\n  <dict>\n    <key>x</key>\n\n    <true/>\n  </dict>"
+    );
+    // A renamed key is its whole element, escaped.
+    assert_eq!(
+        render(Renderer::Key, "b&c", "", Literal::String),
+        "<key>b&amp;c</key>"
     );
 
     let lua = fig::language::register(lang).expect("registers")[0];
@@ -1442,12 +1458,10 @@ fn nestedtext_refuses_what_the_compiled_format_refuses() {
 
 #[test]
 fn nestedtext_renders_as_the_compiled_editor_helper_does() {
-    // The four renderers, by the rules `editor_helper.zig` follows. The
-    // Rust editor is not driven here: it spells a scalar through the
-    // printer, which for NestedText is a `>` block that the tail renderer
-    // then blocks again (fig's `docs/tasks/rust-editor-spells-a-nestedtext-value-through-the-printer.md`);
-    // the twin's edits are held to the compiled format's bytes through the
-    // `fig` CLI instead, which hands the editor plain text.
+    // The four renderers, by the rules `editor_helper.zig` follows, given
+    // the plain text the `fig` CLI hands the editor. The Rust editor, whose
+    // values are splice text, is driven against the compiled format in
+    // `tests/splice.rs`.
     let lang = script("nestedtext.lua");
     let render = |which: Renderer,
                   indent: &str,
