@@ -9,7 +9,7 @@
 //! Locally, `cargo xtask ci` runs the same jobs in the same order against the
 //! same commands, so a green run here is a green run there.
 //!
-//! Cutting a release does not live here. It is `dx <command>`, the shared
+//! Cutting a release does not live here. It is `release`, the shared
 //! tooling configured by `.config/release.toml` — the same tool prov, twig,
 //! leaf, flower, and the historica repos all cut releases with, because five
 //! copies of one program is five places for it to drift.
@@ -185,11 +185,18 @@ fn main() -> ExitCode {
         [
             command @ ("version" | "bump" | "changelog" | "release" | "release-notes"),
             ..,
-        ] => Err(format!(
-            "releasing is not in xtask: `cargo xtask {command}` is `dx {command}`,\n\
+        ] => {
+            let moved = match command {
+                "release" => "release".to_string(),
+                "release-notes" => "release notes".to_string(),
+                other => format!("release {other}"),
+            };
+            Err(format!(
+                "releasing is not in xtask: `cargo xtask {command}` is `{moved}`,\n\
              the shared tooling this repo configures in .config/release.toml.\n\n{}",
-            usage()
-        )),
+                usage()
+            ))
+        }
         [id] => match JOBS.iter().find(|job| job.id == id) {
             Some(job) => (job.run)(&sh),
             None => Err(format!("unknown job `{id}`\n\n{}", usage())),
