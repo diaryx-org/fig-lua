@@ -3,8 +3,7 @@
 # cliff config, and that this is a Cargo workspace.
 name = "fig-lua"
 url = "https://github.com/diaryx-org/fig-lua"
-# What to run before cutting. Each repo owns its own CI; this names it.
-verify = "cargo xtask ci"
+# No `verify`: before cutting, the release runs the jobs in .config/ci.toml.
 
 # No `tag_starts`: nothing runs on the tag. This repository has only `ci.yml`, so
 # the tag cuts the GitHub release and nothing more, and `cargo publish` is a

@@ -12,10 +12,9 @@ keywords = ["fig", "lua", "config", "parser", "plugin"]
 categories = ["config", "parser-implementations", "command-line-utilities"]
 publish = true
 
-# `xtask` is fig-lua's CI, as a program, as it is in fig-schema: `cargo xtask
-# <job>` runs one CI job and the workflow runs nothing else.
+# A workspace of one package, kept for `[workspace.package]` below. CI is not a
+# crate here: it is the jobs in .config/ci.toml, run by `release ci`.
 [workspace]
-members = ["xtask"]
 
 # One `version = "…"` line for the whole repository, which is what `release bump`
 # rewrites and what the package inherits.
