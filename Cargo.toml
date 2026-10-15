@@ -13,10 +13,10 @@ categories = ["config", "parser-implementations", "command-line-utilities"]
 publish = true
 
 # A workspace of one package, kept for `[workspace.package]` below. CI is not a
-# crate here: it is the jobs in .config/ci.toml, run by `release ci`.
+# crate here: it is the jobs in .config/ship.figl, run by `ship ci`.
 [workspace]
 
-# One `version = "…"` line for the whole repository, which is what `release bump`
+# One `version = "…"` line for the whole repository, which is what `ship bump`
 # rewrites and what the package inherits.
 [workspace.package]
 version = "0.1.0"
