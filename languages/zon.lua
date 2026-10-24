@@ -459,13 +459,13 @@ local function escaped(s)
   return (s:gsub('["\\%c\127]', function(c) return ESCAPES[c] or string.format("\\x%02x", c:byte()) end))
 end
 
+local function key_name(key)
+  if key:match(BARE) and not KEYWORDS[key] then return "." .. key end
+  return '.@"' .. escaped(key) .. '"'
+end
+
 local function write_name(w, key)
-  w:put(".")
-  if key:match(BARE) and not KEYWORDS[key] then
-    w:put(key)
-  else
-    w:put('@"', escaped(key), '"')
-  end
+  w:put(key_name(key))
 end
 
 -- A character literal from the codepoint its text spells: the escapes it
@@ -566,9 +566,8 @@ M.name = "lua-zon"
 M.caps = { read = true, edit = true, serialize = true }
 M.lossless = { null = true, enum_literal = true, char_literal = true }
 M.syntax = {
-  comments = { style = "slashes", line = { open = "//" }, trailing = { open = "//" } },
+  comments = { line = { open = "//" }, trailing = { open = "//" } },
   kv_sep = " = ",
-  key_style = "zon_field",
   -- The byte before every key, which the editor removes with the key:
   -- `.` (the wire carries a sigil as its byte).
   key_sigil = 46,
@@ -585,6 +584,14 @@ M.dialects = {
 M.samples = {
   '.{ .a = 1, .b = .{ .c = "d" }, .e = .{ 1, 2 } }\n',
 }
-M.renderers = {}
+-- A key's name as ZON writes one, for a key the editor inserts or
+-- renames: a struct field, `.name`, or `.@"has space"` when
+-- it is not a bare identifier.
+M.renderers = { "key_name" }
+
+function M.render(which, args)
+  if which == "key_name" then return key_name(args.key) end
+  error("no renderer `" .. which .. "`", 0)
+end
 
 return M

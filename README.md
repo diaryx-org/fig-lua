@@ -92,8 +92,7 @@ the compiled parser step for step, and most are grammars:
 - `canonical.lua` — fig's canonical form, the tree spelled with nothing
   added: flow containers, JSON strings, numbers with their kind pinned,
   extended scalars, anchors, tags and aliases, keys that are any node,
-  `//` and `/* */` comments. Every row the wire can carry, in one script;
-  the compiled sibling is opt-in (`zig build -Dcanonical=true`).
+  `//` and `/* */` comments. Every row the wire can carry, in one script.
 
 They are also what a new script is written against: each is a complete
 parser and printer, and `fig lang check <name> --against <format>` is how a
@@ -126,7 +125,7 @@ M.name = "tinykv"
 M.caps = { read = true, edit = true, serialize = true }
 M.max_mapping_depth = 0
 M.syntax = {
-  comments = { style = "hash", line = { open = "#" }, trailing = { open = "#" } },
+  comments = { line = { open = "#" }, trailing = { open = "#" } },
   kv_sep = "=",
   empty_map_literal = "{}",
   flow_containers = false,

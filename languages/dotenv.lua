@@ -32,7 +32,7 @@ M.caps = { read = true, edit = true, serialize = true }
 -- Flat: no mapping inside the root.
 M.max_mapping_depth = 0
 M.syntax = {
-  comments = { style = "hash", line = { open = "#" }, trailing = { open = "#" } },
+  comments = { line = { open = "#" }, trailing = { open = "#" } },
   kv_sep = "=",
   empty_map_literal = "{}",
   flow_containers = false,

@@ -61,10 +61,9 @@ M.lossless = {
   number_special = true,
 }
 M.syntax = {
-  comments = { style = "hash", line = { open = "#" }, trailing = { open = "#" } },
+  comments = { line = { open = "#" }, trailing = { open = "#" } },
   kv_sep = " = ",
   flow_map_pad = " ",
-  key_style = "bare_or_quoted",
   empty_map_literal = "{}",
   block_seq_editable = false,
   section_noun = "table",
@@ -78,7 +77,6 @@ M.dialects = {
 M.samples = {
   'a = 1\nb = [1, 2]\n\n[s]\nk = "v"\nt = { x = 1 }\n',
 }
-M.renderers = {}
 
 -- ── refusals ──────────────────────────────────────────────────────────────
 -- The wordings more than one rule reaches for; the rest are written where
@@ -990,6 +988,15 @@ function M.print(_dialect, t, options)
     w:put(inline(root), "\n")
   end
   return w:string()
+end
+
+-- A key's name as TOML writes one, for a key the editor inserts or
+-- renames: bare when it can be, else a basic string.
+M.renderers = { "key_name" }
+
+function M.render(which, args)
+  if which == "key_name" then return spell_key(args.key) end
+  error("no renderer `" .. which .. "`", 0)
 end
 
 return M

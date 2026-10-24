@@ -18,25 +18,25 @@
 //! script returns, as Lua tables.
 //!
 //! ```no_run
-//! use fig::{Document, Format};
+//! use fig::Document;
 //! use fig_lua::LuaLanguage;
 //!
 //! let lang = LuaLanguage::from_file("languages/dotenv.lua")?;
 //! let lua_dotenv = fig::language::register(lang)?[0];
 //! let doc = Document::parse(b"A=1\n", lua_dotenv)?;
-//! assert_eq!(doc.serialize(Format::Json)?, "{\n  \"A\": \"1\"\n}\n");
+//! assert_eq!(doc.serialize(fig_json::format()?)?, "{\n  \"A\": \"1\"\n}\n");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use std::path::Path;
 use std::sync::Mutex;
 
-use fig::Value;
 use fig::helper::{description_from_value, table_from_value, table_to_value};
 use fig::language::{
     Description, Language, LanguageError, NodeTable, PrintOptions, RenderArgs, Renderer,
 };
 use mlua::{Function, Lua, RegistryKey, Table};
+use serde_json::Value;
 
 pub mod convert;
 pub mod script {
@@ -97,9 +97,11 @@ pub mod script {
     //! get <file> <path>`): spell it as the scalar stands alone.
     //!
     //! `render(which, args)` answers one of the renderers `M.renderers`
-    //! declares — `which` is "value", "entry", "item", "tail" or "key" —
-    //! given `{dialect=, indent=, key=, value=, literal=, old_key=}`, and
-    //! returns the fragment as a string. `literal` is what fig's
+    //! declares — `which` is "value", "entry", "item", "tail", "key",
+    //! "key_name" or "string" — given `{dialect=, indent=, key=, value=,
+    //! literal=, old_key=, old_value=, parent_key=, parent_tag=}`, and
+    //! returns the fragment as a string. What each renderer is handed is
+    //! `fig::language::RenderArgs`'s to say. `literal` is what fig's
     //! bare-literal rules made of `value`: "null", "bool", "int", "float",
     //! "datetime" or "string" — classified by fig, so a script spells the
     //! kind it is told and never decides one.
@@ -310,9 +312,9 @@ impl Language for LuaLanguage {
                     Some(mlua::Value::Number(n)) if n >= 0.0 => Some(n as usize),
                     _ => None,
                 };
-                Err(LanguageError {
-                    message,
-                    byte_offset: offset,
+                Err(match offset {
+                    Some(offset) => LanguageError::at(message, offset),
+                    None => LanguageError::new(message),
                 })
             }
             Some(other) => Err(LanguageError::new(format!(
@@ -373,17 +375,13 @@ impl Language for LuaLanguage {
         set("key", args.key)?;
         set("value", args.value)?;
         set("old_key", args.old_key)?;
+        set("old_value", args.old_value)?;
+        set("parent_key", args.parent_key)?;
+        set("parent_tag", args.parent_tag)?;
         // What fig's bare-literal rules made of the value, for the value
         // renderer: "null", "bool", "int", "float", "datetime" or "string".
         set("literal", args.literal.name().as_bytes())?;
-        let name = match which {
-            Renderer::Value => "value",
-            Renderer::Entry => "entry",
-            Renderer::Item => "item",
-            Renderer::Tail => "tail",
-            Renderer::Key => "key",
-        };
-        let out: mlua::LuaString = render.call((name, a)).map_err(lua_error)?;
+        let out: mlua::LuaString = render.call((which.name(), a)).map_err(lua_error)?;
         Ok(out.as_bytes().to_vec())
     }
 }

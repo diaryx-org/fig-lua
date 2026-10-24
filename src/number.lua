@@ -15,7 +15,9 @@ local N = {}
 --- means that spelling is canonicalized to decimal before it is written:
 --- `hex` (`0x1F`), `octal` (`0o17`), `binary` (`0b1010`), `underscores`
 --- (`1_000`), `leading_zero` (`0755`), `bare_dot` (`.5`, `5.`), `plus` (a
---- leading `+`).
+--- leading `+`). `non_finite` is the format's own spelling of each
+--- non-finite float, `{ inf =, neg_inf =, nan = }`, or nil for a format
+--- that has none.
 N.NONE = {}
 
 --- Strict JSON: none of it.
@@ -23,11 +25,35 @@ N.JSON = N.NONE
 
 --- JSON5's numbers are ES5.1 numeric literals: hex, a leading `+`, and
 --- bare dots — not `0o`/`0b`, `_`, or a leading zero.
-N.JSON5 = { hex = true, bare_dot = true, plus = true }
+N.JSON5 = {
+  hex = true, bare_dot = true, plus = true,
+  non_finite = { inf = "Infinity", neg_inf = "-Infinity", nan = "NaN" },
+}
 
 --- YAML 1.2 core: hex and octal, a bare dot, a leading `+`, and a leading
 --- zero (read as decimal); no `0b` and no `_`, which 1.2 reads as strings.
-N.YAML_1_2 = { hex = true, octal = true, leading_zero = true, bare_dot = true, plus = true }
+N.YAML_1_2 = {
+  hex = true, octal = true, leading_zero = true, bare_dot = true, plus = true,
+  non_finite = { inf = ".inf", neg_inf = "-.inf", nan = ".nan" },
+}
+
+--- Which non-finite float `raw` spells, if it spells one, in any of the
+--- ways a parser stores it: `inf`/`nan` (TOML, ZON), `.inf`/`.nan` in
+--- YAML's three cases, and `Infinity`/`NaN` (JSON5) — each with an optional
+--- sign, which a NaN ignores. "inf", "neg_inf", "nan" or nil.
+function N.non_finite(raw)
+  local body, negative = raw, false
+  local first = body:sub(1, 1)
+  if first == "+" or first == "-" then
+    negative = first == "-"
+    body = body:sub(2)
+  end
+  if body:sub(1, 1) == "." then body = body:sub(2) end
+  body = body:lower()
+  if body == "inf" or body == "infinity" then return negative and "neg_inf" or "inf" end
+  if body == "nan" then return "nan" end
+  return nil
+end
 
 --- Whether a format that spells `s` reads `raw` back as the same number.
 function N.spellable(raw, s)
@@ -111,9 +137,15 @@ function N.canonical(raw)
   return out .. (exponent:gsub("_", ""))
 end
 
---- `raw` as a format that spells `s` writes it: itself when spellable,
---- else canonical.
+--- `raw` as a format that spells `s` writes it: a non-finite float in the
+--- format's own spelling (an error where it has none), else itself when
+--- spellable, else canonical.
 function N.text(raw, s)
+  local v = N.non_finite(raw)
+  if v then
+    if s and s.non_finite then return s.non_finite[v] end
+    error("this format has no spelling for the non-finite number " .. raw, 0)
+  end
   if N.spellable(raw, s) then return raw end
   return N.canonical(raw)
 end

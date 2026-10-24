@@ -3,8 +3,9 @@
 //! what `fig.grammar` does.
 
 use fig::language::Language;
-use fig::{Document, Editor, Segment, Value};
+use fig::{Document, Editor, Segment};
 use fig_lua::LuaLanguage;
+use serde_json::Value;
 
 fn readme_script() -> String {
     let readme =
@@ -27,7 +28,7 @@ fn the_readme_example_parses_its_sample_with_comments_bound() {
     let json = fig::helper::encode(&fig::helper::table_to_value(&table));
     assert_eq!(
         json,
-        r#"{"rows":[{"kind":"mapping","parent":null,"span":[0,24]},{"kind":"keyvalue","parent":0,"span":[0,3]},{"kind":"string","parent":1,"span":[0,1],"text":"a"},{"kind":"string","parent":1,"span":[2,3],"text":"1"},{"kind":"keyvalue","parent":0,"span":[10,15]},{"kind":"string","parent":4,"span":[10,11],"text":"b"},{"kind":"string","parent":4,"span":[12,15],"text":"two"}],"regions":[],"mentions":[],"comments":[{"node":5,"slot":"leading","style":"line","text":"two"},{"node":6,"slot":"trailing","style":"line","text":"words"}]}"#
+        r#"{"comments":[{"node":5,"slot":"leading","style":"line","text":"two"},{"node":6,"slot":"trailing","style":"line","text":"words"}],"mentions":[],"regions":[],"rows":[{"kind":"mapping","parent":null,"span":[0,24]},{"kind":"keyvalue","parent":0,"span":[0,3]},{"kind":"string","parent":1,"span":[0,1],"text":"a"},{"kind":"string","parent":1,"span":[2,3],"text":"1"},{"kind":"keyvalue","parent":0,"span":[10,15]},{"kind":"string","parent":4,"span":[10,11],"text":"b"},{"kind":"string","parent":4,"span":[12,15],"text":"two"}]}"#
     );
 }
 
@@ -36,14 +37,14 @@ fn the_readme_example_applies_the_duplicate_policy_and_dangles_a_last_comment() 
     let lang = tinykv();
     let table = lang.parse("tinykv", b"a=1\na=2\n# end\n").unwrap();
     let v = fig::helper::table_to_value(&table);
-    let rows = v.get("rows").and_then(Value::as_seq).unwrap();
+    let rows = v.get("rows").and_then(Value::as_array).unwrap();
     assert_eq!(rows.len(), 4, "one entry: the first keeps its place");
     assert_eq!(rows[3].get("text").and_then(Value::as_str), Some("2"));
     assert_eq!(
         rows[1].get("span").map(fig::helper::encode).as_deref(),
         Some("[0,3]")
     );
-    let comments = v.get("comments").and_then(Value::as_seq).unwrap();
+    let comments = v.get("comments").and_then(Value::as_array).unwrap();
     assert_eq!(comments.len(), 1);
     assert_eq!(comments[0].get("node").and_then(Value::as_i64), Some(0));
     assert_eq!(
@@ -136,12 +137,12 @@ fn sections_record_the_header_lines_the_names_and_the_waiting_comments() {
     // (root, keyvalue, key, mapping), `b` node 12.
     assert_eq!(
         regions,
-        r#"[{"node":3,"start":10,"end":14},{"node":3,"start":22,"end":26},{"node":12,"start":18,"end":22}]"#
+        r#"[{"end":14,"node":3,"start":10},{"end":26,"node":3,"start":22},{"end":22,"node":12,"start":18}]"#
     );
     let mentions = fig::helper::encode(v.get("mentions").unwrap());
     assert_eq!(
         mentions,
-        r#"[{"node":3,"span":[11,12],"kind":"header"},{"node":3,"span":[23,24],"kind":"header"},{"node":12,"span":[19,20],"kind":"header"}]"#
+        r#"[{"kind":"header","node":3,"span":[11,12]},{"kind":"header","node":3,"span":[23,24]},{"kind":"header","node":12,"span":[19,20]}]"#
     );
     let comments = fig::helper::encode(v.get("comments").unwrap());
     assert_eq!(
@@ -214,7 +215,7 @@ fn number_and_datetime_answer_as_the_compiled_utilities_do() {
     ] {
         let table = lang.parse("probe", raw.as_bytes()).unwrap();
         let v = fig::helper::table_to_value(&table);
-        let rows = v.get("rows").and_then(Value::as_seq).unwrap();
+        let rows = v.get("rows").and_then(Value::as_array).unwrap();
         assert_eq!(
             rows[0].get("text").and_then(Value::as_str),
             Some(want),

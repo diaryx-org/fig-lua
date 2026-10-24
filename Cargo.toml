@@ -38,19 +38,30 @@ path = "src/main.rs"
 # The contract this crate implements: `fig::language::Language` is what a
 # script becomes, `fig::helper::serve` is what the binary runs, and the
 # `helper` module's JSON shape is the shape a script speaks — so the Lua
-# side is documented once, there. The default feature set, deliberately:
-# it links fig's prebuilt core, so `cargo install fig-lua` needs no Zig
-# toolchain, at the price of carrying formats a helper never uses. Needs
-# the `language` and `helper` modules, on fig's main ahead of its next
-# release.
-fig = "4"
+# side is documented once, there. fig is pure Rust from 7 and registers no
+# language by default, so a helper carries only the one it serves; the
+# `helper` feature is the wire, read and written with serde_json.
+fig = { version = "7", features = ["helper"] }
+# The wire's JSON: what `fig::helper`'s functions trade, and what a script's
+# tables convert to and from.
+serde_json = "1"
 # Lua 5.4, vendored: the engine is built into the binary, so a helper is
 # one file with no runtime to install beside it. `send` because a Language
 # is `Send + Sync`.
 mlua = { version = "0.12", features = ["lua54", "vendored", "send"] }
 
-# No dev-dependencies: the tests hold `dotenv.lua` to the compiled dotenv
-# in-process, and dotenv is in fig's default set. plist is not — it would
-# mean building fig's core from source, with a Zig toolchain — so
-# `plist.lua` is held to its sibling table for table, through the fixtures
+# The compiled languages each twin is held to in-process: since fig 7 each is
+# a crate of its own, and `fig` alone registers none. Only their `fig`
+# feature, which is `register()` and `format()`; not their serde API. plist
+# is held to its sibling table for table, through the fixtures
 # `fig lang table -i plist` printed, and not in-process.
+[dev-dependencies]
+fig-dotenv = { version = "7", default-features = false, features = ["fig"] }
+fig-figl = { version = "7", default-features = false, features = ["fig"] }
+fig-ini = { version = "7", default-features = false, features = ["fig"] }
+fig-json = { version = "7", default-features = false, features = ["fig"] }
+fig-nestedtext = { version = "7", default-features = false, features = ["fig"] }
+fig-properties = { version = "7", default-features = false, features = ["fig"] }
+fig-toml = { version = "7", default-features = false, features = ["fig"] }
+fig-yaml = { version = "7", default-features = false, features = ["fig"] }
+fig-zon = { version = "7", default-features = false, features = ["fig"] }

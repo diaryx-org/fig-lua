@@ -57,7 +57,7 @@ local M = {}
 M.name = "lua-fig"
 M.caps = { read = true, edit = true, serialize = true }
 M.syntax = {
-  comments = { style = "hash", line = { open = "#" }, trailing = { open = "#" } },
+  comments = { line = { open = "#" }, trailing = { open = "#" } },
   kv_sep = " = ",
   flow_kv_sep_from_siblings = true,
   flow_map_pad = " ",
