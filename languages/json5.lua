@@ -52,23 +52,21 @@ M.caps = { read = true, edit = true, serialize = true }
 -- rides in a `$fig` envelope, JSON5's own `Infinity`/`NaN` included.
 M.lossless = { null = true }
 M.syntax = {
-  comments = { style = "slashes", line = { open = "//" }, trailing = { open = "//" } },
+  comments = { line = { open = "//" }, trailing = { open = "//" } },
   kv_sep = ": ",
-  key_style = "json_quoted",
   empty_map_literal = "{}",
 }
 M.dialects = {
   -- The language's own name goes on its first dialect; the compiled
   -- dialects own `.json5` and `.jsonc`, and a compiled format's extension
   -- wins, so these are reached by `--lang lua-json5` / `--lang lua-jsonc`.
-  { name = "lua-json5", extensions = { "json5" }, splice = "json_string", empty_doc_seed = "{}\n" },
-  { name = "lua-jsonc", extensions = { "jsonc" }, splice = "json_string", empty_doc_seed = "{}\n" },
+  { name = "lua-json5", extensions = { "json5" }, splice = "escaped", empty_doc_seed = "{}\n" },
+  { name = "lua-jsonc", extensions = { "jsonc" }, splice = "escaped", empty_doc_seed = "{}\n" },
 }
 M.samples = {
   '{"a": 1, "b": [true, null, "s"], "c": {"d": 2.5}}\n',
   "// top\n[] // empty\n",
 }
-M.renderers = {}
 
 -- ── errors ────────────────────────────────────────────────────────────────
 
@@ -583,6 +581,16 @@ function M.print(dialect, t, options)
   if not is_container(root) then p:trailing(root) end
   w:put("\n")
   return w:string()
+end
+
+-- A key's name as JSON5 and JSONC write one, for a key the editor inserts or
+-- renames: quoted and escaped, as the compiled dialects write it, though JSON5
+-- could leave an identifier bare.
+M.renderers = { "key_name" }
+
+function M.render(which, args)
+  if which == "key_name" then return quote(args.key) end
+  error("no renderer `" .. which .. "`", 0)
 end
 
 return M

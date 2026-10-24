@@ -29,7 +29,7 @@ local M = {}
 M.name = "lua-nestedtext"
 M.caps = { read = true, edit = true, serialize = true }
 M.syntax = {
-  comments = { style = "hash", line = { open = "#" } },
+  comments = { line = { open = "#" } },
   kv_sep = ": ",
   indent_unit = "    ",
   seq_item_marker = "- ",

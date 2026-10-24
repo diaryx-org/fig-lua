@@ -48,69 +48,148 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "fig"
-version = "4.1.0"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdab6431d21f8399db41f3da6a38630f1c9cee2053a3fa2ce12fa8f2918e95f8"
+checksum = "1912585cea7b84fd1cbacdd0ee85c57b12f54cc46a917145d97a62b95c3eafab"
 dependencies = [
- "fig-sys",
+ "fig-core",
+ "serde_json",
 ]
+
+[[package]]
+name = "fig-core"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "310da8e88299b38abe3aadfa1aecce5c46a93dc767ee38900f23e9f630e05290"
+dependencies = [
+ "fig-kit",
+]
+
+[[package]]
+name = "fig-dotenv"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d2f67701a7e20b090edbf66d1e39dcdd022c488fde55f65abbd6311a2c23f22"
+dependencies = [
+ "fig",
+ "fig-kit",
+]
+
+[[package]]
+name = "fig-figl"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "408de7cd00cce13acf2174086a66f4e8438559462711f13a0032b8e9198d58df"
+dependencies = [
+ "fig",
+ "fig-kit",
+]
+
+[[package]]
+name = "fig-ini"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b418e648abe11ce4c4fd1e80311247cf3180f2d718a856f44990db75b6481113"
+dependencies = [
+ "fig",
+ "fig-kit",
+]
+
+[[package]]
+name = "fig-json"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a4baefafc7c88ebacda7d1d2423eba469828d490199462f032bfbf3db6637b7"
+dependencies = [
+ "fig",
+ "fig-kit",
+]
+
+[[package]]
+name = "fig-kit"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0005cbc0579d07474d9a452c76f23cbf55ba6c82dd84c7e7ed5c38ace903a7a"
 
 [[package]]
 name = "fig-lua"
 version = "0.1.0"
 dependencies = [
  "fig",
+ "fig-dotenv",
+ "fig-figl",
+ "fig-ini",
+ "fig-json",
+ "fig-nestedtext",
+ "fig-properties",
+ "fig-toml",
+ "fig-yaml",
+ "fig-zon",
  "mlua",
+ "serde_json",
 ]
 
 [[package]]
-name = "fig-sys"
-version = "4.1.0"
+name = "fig-nestedtext"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "745f13f87d40b394d1f5ce4a15ab58b94b19b51a11b97d27f720ca8d05640442"
+checksum = "976048d3a8f0d49db66e9e7c6b52026b2fe921520ae6e379209f01cc1b061337"
 dependencies = [
- "fig-sys-linux-arm64-gnu",
- "fig-sys-linux-x64-gnu",
- "fig-sys-macos-arm64",
- "fig-sys-wasm32",
- "fig-sys-windows-x64-msvc",
+ "fig",
+ "fig-kit",
 ]
 
 [[package]]
-name = "fig-sys-linux-arm64-gnu"
-version = "4.1.0"
+name = "fig-properties"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2dc81d1a3d5214e2609791bfe8de2982ff73d813b8843714df2b587778ba8a7"
+checksum = "c221c30925da735747c5f35ba9832633df59cd940a8021263238356dcf42c0b5"
+dependencies = [
+ "fig",
+ "fig-kit",
+]
 
 [[package]]
-name = "fig-sys-linux-x64-gnu"
-version = "4.1.0"
+name = "fig-toml"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7a8000c6f79748432976fcc4491e61616d7ac0901b5630c5ab2302098d10eac"
+checksum = "47f4110cda967917a1447fbc44082620ba71ff202ab7a34b61b7abfd19a3de54"
+dependencies = [
+ "fig",
+ "fig-kit",
+]
 
 [[package]]
-name = "fig-sys-macos-arm64"
-version = "4.1.0"
+name = "fig-yaml"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f662347684a27c55d992ba1beefbe732386cbcaf2774dc1346ce759497906ea"
+checksum = "62e8dca9c7c5083277a28c48a0b16a6fabc110a7fea8e2c53d197afc129f07e3"
+dependencies = [
+ "fig",
+ "fig-kit",
+]
 
 [[package]]
-name = "fig-sys-wasm32"
-version = "4.1.0"
+name = "fig-zon"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc19a0cedd8e1da5782af6ad993a7b7786b72687f13991489441e7723c4672f"
-
-[[package]]
-name = "fig-sys-windows-x64-msvc"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b084a2d16ad957ae7db7ec3a8f6cb3134fff8aac166ec8d1d593e5316243c7d"
+checksum = "cf6ddb7ae3d30bc1d9827384e1b5b1defdf5e8dccb20fee01d83e052a9415c81"
+dependencies = [
+ "fig",
+ "fig-kit",
+]
 
 [[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
+
+[[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "libc"
@@ -259,6 +338,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "serde"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -276,6 +364,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -321,3 +422,9 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

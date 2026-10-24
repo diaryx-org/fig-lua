@@ -45,7 +45,6 @@ M.name = "lua-plist"
 M.caps = { read = true, edit = true, serialize = true }
 M.syntax = {
   comments = {
-    style = "xml_comment",
     line = { open = "<!--", close = "-->", forbidden = "--" },
     trailing = { open = "<!--", close = "-->", forbidden = "--" },
   },
@@ -189,7 +188,7 @@ local elements = {
   data = function(sc, _ctx, tag)
     local t = X.content(sc, tag):gsub("[ \t\r\n]", "")
     if not valid_base64(t) then sc:fail("`<data>` holds something other than base64", tag[1]) end
-    return scalar("string", sc, tag, t, { ext_kind = "plist_data" })
+    return scalar("string", sc, tag, t, { ext_kind = "data" })
   end,
 }
 
@@ -259,7 +258,7 @@ local function write_value(w, row, depth)
     w:put("<real>", row.text or "", "</real>")
   elseif k == "string" then
     local tag = "string"
-    if row.ext_kind == "plist_date" then tag = "date" elseif row.ext_kind == "plist_data" then tag = "data" end
+    if row.ext_kind == "plist_date" then tag = "date" elseif row.ext_kind == "data" then tag = "data" end
     w:put(text_element(tag, row.text or ""))
   elseif k == "sequence" then
     if #row.items == 0 then return w:put("<array/>") end

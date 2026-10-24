@@ -61,7 +61,7 @@ local NAME = "[A-Za-z0-9_%-]+"
 local EXT_KINDS = {
   offset_datetime = true, local_datetime = true, local_date = true, local_time = true,
   enum_literal = true, char_literal = true, number_special = true,
-  plist_date = true, plist_data = true,
+  plist_date = true, data = true,
 }
 
 local line_comment = G.comment("//")

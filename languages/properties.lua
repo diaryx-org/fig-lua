@@ -37,7 +37,7 @@ M.caps = { read = true, edit = true, serialize = true }
 M.max_mapping_depth = 0
 M.syntax = {
   -- `#` and `!` are read; `#` is written, and what the editor scans for.
-  comments = { style = "hash", line = { open = "#" } },
+  comments = { line = { open = "#" } },
   -- `=`, `:` and a space are read; `=` is written.
   kv_sep = "=",
   empty_map_literal = "{}",

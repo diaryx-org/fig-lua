@@ -40,21 +40,19 @@ M.caps = { read = true, edit = true, serialize = true }
 -- extended scalar rides in a `$fig` envelope.
 M.lossless = { null = true }
 M.syntax = {
-  comments = { style = "slashes" },
+  comments = {},
   kv_sep = ": ",
-  key_style = "json_quoted",
   empty_map_literal = "{}",
 }
 M.dialects = {
   -- The compiled format owns `.json`, and a compiled format's extension
   -- wins, so this is reached by `--lang lua-json`.
-  { name = "lua-json", extensions = { "json" }, splice = "json_string", empty_doc_seed = "{}\n" },
+  { name = "lua-json", extensions = { "json" }, splice = "escaped", empty_doc_seed = "{}\n" },
 }
 M.samples = {
   '{"a": 1, "b": [true, null, "s"], "c": {"d": 2.5}}\n',
   "[]\n",
 }
-M.renderers = {}
 
 -- ── refusals ──────────────────────────────────────────────────────────────
 -- JSON's grammar is small and so is its vocabulary of refusals: nearly
@@ -311,6 +309,15 @@ function M.print(_dialect, t, options)
   write_node(w, t.byid(0), 0)
   w:put("\n")
   return w:string()
+end
+
+-- A key's name as JSON writes one, for a key the editor inserts or
+-- renames: quoted and escaped, which strict JSON requires.
+M.renderers = { "key_name" }
+
+function M.render(which, args)
+  if which == "key_name" then return quote(args.key) end
+  error("no renderer `" .. which .. "`", 0)
 end
 
 return M

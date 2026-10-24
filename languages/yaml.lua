@@ -50,7 +50,7 @@ M.caps = { read = true, edit = true, serialize = true, references = true }
 -- The core schema has a `null` and none of the extended scalars.
 M.lossless = { null = true }
 M.syntax = {
-  comments = { style = "hash", line = { open = "#" }, trailing = { open = "#" } },
+  comments = { line = { open = "#" }, trailing = { open = "#" } },
   merge_key = "<<",
   kv_sep = ": ",
   empty_map_literal = "",
@@ -114,8 +114,10 @@ local function trim_cr(src, start, nl)
   return nl
 end
 
-local function trim_right_spaces(src, start, e)
-  while e > start and at(src, e - 1) == SP do e = e - 1 end
+-- A plain scalar never ends in a blank: trailing spaces and tabs before a
+-- comment or the line's end are not its text (`a: 1\t# c` is `1`).
+local function trim_right_blanks(src, start, e)
+  while e > start and is_blank(at(src, e - 1)) do e = e - 1 end
   return e
 end
 
@@ -128,6 +130,25 @@ end
 -- True when the byte after `i` is blank or `i` is the last byte of the line.
 local function followed_by_blank(src, i, line_end)
   return i + 1 >= line_end or is_blank(at(src, i + 1))
+end
+
+-- True when `col` is the content column of one of the `- ` that begin the
+-- line whose first dash is at `entry_dash`, in column `dash_col`: the column
+-- just past the first dash, and for a compact nested sequence (`- - - a`)
+-- past each later one. Content after the last dash ends the walk.
+local function entry_content_column(src, entry_dash, dash_col, col)
+  if not entry_dash then return false end
+  local c = entry_dash
+  local line_start = c - dash_col
+  local line_end = find(src, "\n", c + 1, true)
+  line_end = line_end and line_end - 1 or #src
+  while c < line_end and at(src, c) == DASH and followed_by_blank(src, c, line_end) do
+    c = c + 1
+    while c < line_end and at(src, c) == SP do c = c + 1 end
+    if c == line_end then return false end
+    if c - line_start == col then return true end
+  end
+  return false
 end
 
 -- A `:` is a value indicator when followed by blank/EOL, or in flow by a
@@ -398,7 +419,7 @@ function T:open_flow(line)
 end
 
 function T:add_scalar(s, e)
-  local te = trim_right_spaces(self.src, s, e)
+  local te = trim_right_blanks(self.src, s, e)
   if te > s then self:add("scalar", s, te) end
 end
 
@@ -458,11 +479,11 @@ function T:gather_plain_continuation(line, floor)
       local se = scalar_end(src, ws, e, false)
       if se ~= e then
         if at(src, se) == HASH then
-          result = { content_end = trim_right_spaces(src, ws, se), last_line = ln }
+          result = { content_end = trim_right_blanks(src, ws, se), last_line = ln }
         end
         break
       end
-      result = { content_end = trim_right_spaces(src, ws, e), last_line = ln }
+      result = { content_end = trim_right_blanks(src, ws, e), last_line = ln }
       probe = newline_end
     end
   end
@@ -761,6 +782,10 @@ function T:tokenize()
   local indent_stack = { { indent = 0, prop_only = false } }
   local current_indent = 0
 
+  -- A leading UTF-8 BOM is not content: the first line starts after it,
+  -- so its indentation and its first key are read as without one.
+  if self.i == 0 and src:sub(1, 3) == "\239\187\191" then self.i = 3 end
+
   while true do
     local line = self:get_line()
     if not line then break end
@@ -812,17 +837,18 @@ function T:tokenize()
           end
           self:add("dedent", line.content_start, line.content_start)
         end
-        if indent ~= current_indent and indent > current_indent and indent_stack[#indent_stack].seq_content == indent then
+        local last = indent_stack[#indent_stack]
+        if indent ~= current_indent and indent > current_indent and entry_content_column(src, last.entry_dash, last.indent, indent) then
           indent_stack[#indent_stack + 1] = { indent = indent, prop_only = prop_only }
           current_indent = indent
         end
         if indent ~= current_indent then fig.fail("this line's indentation matches no block open above it", line.content_start) end
       end
 
+      -- Where a block-sequence entry begins on its level, so a later dedent
+      -- can return to the content column of any `- ` on its line.
       if at(src, line.content_start) == DASH and followed_by_blank(src, line.content_start, line.e) then
-        local c = line.content_start + 1
-        while c < line.e and at(src, c) == SP do c = c + 1 end
-        if c < line.e then indent_stack[#indent_stack].seq_content = c - line.start end
+        indent_stack[#indent_stack].entry_dash = line.content_start
       end
 
       if indent == 0 then
@@ -1339,6 +1365,16 @@ function P:add_node(kind, s, e, extra)
   n.id = id
   local tag, anchor = self.pending_tag, self.pending_anchor
   self.pending_tag, self.pending_anchor = nil, nil
+  -- An implicit empty (`k: !!str`, `- &a`) is anchored at the separator,
+  -- before its properties: it covers them instead, as a written value does,
+  -- so a replace takes them rather than writing in front of them (`x !!str`).
+  local after
+  if s == e then
+    if tag and tag.s >= s then after = { tag.s, tag.e } end
+    if anchor and anchor.s >= s then
+      after = after and { math.min(after[1], anchor.s), math.max(after[2], anchor.e) } or { anchor.s, anchor.e }
+    end
+  end
   if tag then
     if tag.s < n.span[1] then n.span[1] = tag.s end
     n.tag = tag.text
@@ -1350,6 +1386,7 @@ function P:add_node(kind, s, e, extra)
     n.anchor_span = { anchor.s, anchor.e }
     self.anchors[#self.anchors + 1] = { name = anchor.name, node = id }
   end
+  if after then n.span = after end
   self.nodes[id + 1] = n
   if not self.parking_container then self:claim_leading(id) end
   return id
@@ -1604,6 +1641,28 @@ function P:close_sequence_item_continuation()
     local id = self:close_container(self:span_of(self:current().id)[2])
     self:finish_value(id)
   end
+end
+
+-- Hands a line beginning at column `col` to the open compact item container
+-- (`continues_sequence_item`) that begins at that column, closing the ones
+-- nested deeper than it on its dash line: in `- - - a\n  - d` the `- d` is
+-- an item of the middle sequence, so the innermost closes, and the middle one
+-- takes the line as its own content by clearing its flag. Containers left of
+-- `col`, and any container that is not a compact item, are left open. True
+-- when a compact item begins at `col`.
+function P:land_continuations(col)
+  while #self.stack > 0 do
+    local c = self:current()
+    if not c.continues_sequence_item then return false end
+    local c_col = self:column_of(self:span_of(c.id)[1])
+    if c_col < col then return false end
+    c.continues_sequence_item = false
+    if c_col == col then return true end
+    self:close_pending_empty_value()
+    local id = self:close_container(self:span_of(self:current().id)[2])
+    self:finish_value(id)
+  end
+  return false
 end
 
 function P:close_open_complex_key()
@@ -2152,10 +2211,13 @@ function P:parse()
     end
     if k == "indent" then
       if #self.stack > 0 and self:current().continues_sequence_item then
-        if self:column_of(self:peek().e) > self:current_container_indent() then
+        local col = self:column_of(self:peek().e)
+        if col > self:current_container_indent() then
           self.force_new_container = true
-        else
-          self:current().continues_sequence_item = false
+        elseif not self:land_continuations(col) then
+          -- A column between two nested compact items (`   - d` under
+          -- `- - - a`) begins no node.
+          fail("this line's indentation matches no block open above it", self:peek().e)
         end
       else
         self.force_new_container = true
@@ -2184,12 +2246,11 @@ function P:parse()
           if not close_parent_too then break end
           self:close_pending_empty_value()
         end
-        if #self.stack > 0 then
-          local c = self:current()
-          if c.continues_sequence_item and c.kind == "mapping" and self:column_of(self:span_of(c.id)[1]) == dedent_col then
-            c.continues_sequence_item = false
-          end
-        end
+        -- A dedent landing exactly at an open compact item's own column
+        -- returns to a sibling within that item: the next key of an item
+        -- mapping (`- k:\n    v: 1\n  sib: 2`), or the next item of a nested
+        -- compact sequence (`- - - a\n    - b\n  - c`).
+        self:land_continuations(dedent_col)
       end
     elseif k == "newline" then
       self.on_doc_start_line = false
