@@ -25,8 +25,17 @@
 --     element records its `*` as `marker`;
 --   * a block container's *regions* are the line that created it and
 --     every later header line that re-opened it by its final segment;
---     its *mentions* are its key and each such re-opening's key, all of
---     kind `entry` — a fig header sits on its parent's own lines;
+--     its *mentions* are every key that makes or re-opens it, at a
+--     path's end or mid-way: `entry` where the line is one of its
+--     parent's own (in the parent's body, or a parent this line made),
+--     `header` where the path reached the parent through a container
+--     written elsewhere; a literal `[n]` is an `index` mention of the
+--     element it addresses, and an `a.b[]` header's path, and each `+`
+--     that repeats it, an `append` mention of the element it makes;
+--   * a flow `[…]` separates its members with `,`; a `{…}` is spelled
+--     with `=` (compact: whitespace between pairs, a value of one token,
+--     a dotted key through implicit sub-objects that close with it) or
+--     with `:` and quoted keys, JSON's way;
 --   * a bare value is sniffed literal-else-string: `null`, `true`,
 --     `false`, a number with its lexeme kept verbatim, a datetime; a
 --     `: type =` annotation is checked and kept as a `tag` (`!!int`,
@@ -59,15 +68,24 @@ M.caps = { read = true, edit = true, serialize = true }
 M.syntax = {
   comments = { line = { open = "#" }, trailing = { open = "#" } },
   kv_sep = " = ",
+  -- An `=`-spelled flow object is compact, `{x=1 y=2}`, and an insert into
+  -- one copies the separators it already uses.
   flow_kv_sep_from_siblings = true,
-  flow_map_pad = " ",
+  flow_map_kv_sep = "=",
+  flow_map_entry_sep = " ",
   empty_map_literal = "{}",
+  empty_seq_literal = "[]",
   -- The `>` run that opens a line is depth, not whitespace: a line the
   -- engine writes repeats it; one level is one `> ` cell, an element `* `.
   structural_indent = true,
   indent_unit = "> ",
   seq_item_marker = "* ",
+  -- A line may open with its `>` run and a `+` line's mark.
+  line_prefix_marks = ">+",
   section_noun = "container",
+  -- A `'''`/`"""` string's comment is on its opener line, as is that of a
+  -- flow value over several lines whose opener holds no element.
+  opener_line_comment = true,
 }
 M.dialects = {
   -- The compiled format owns `.figl` and `.fig`, and a compiled format's
@@ -110,6 +128,11 @@ local E = {
   FigClosedFlowValue = "a value written inline as `[…]`/`{…}` is closed and cannot be extended later; write the block or header form if it needs to grow",
   FigUnclosedFlow = "this `[`/`{` value never finds its matching close; close it, or quote the whole value to make it a string",
   FigMixedFlowSeparators = "a flow object is fig (`=` pairs) or JSON (`:` pairs), never both in one object",
+  FigFlowMissingEquals = "a `{…}` member is `key=value`, its unquoted value one word; quote a value that has spaces in it: `{name=\"Ada Lovelace\"}`",
+  FigFlowMissingComma = "members of a `[…]` list, or of a JSON-spelled `{…}` object, are separated by `,`, and an unquoted value stays on one line; add the comma, or quote the value",
+  FigFlowEmptyElement = "there is nothing between these commas; remove the extra `,`",
+  FigFlowMultilineString = "a `'''`/`\"\"\"` string cannot sit inside `[…]`/`{…}`; write the container in block form, or a one-line quoted string with `\\n`",
+  FigFlowCommentedClose = "a `#` after a space opens a comment inside `[…]`/`{…}` too, and this one swallowed the closing bracket; quote the value that holds the `#`",
   FigUnclosedString = "unclosed string; add the closing quote (a single-line quote cannot span lines — use `'''` for multi-line)",
   FigBadEscape = "invalid escape; double quotes support \\n \\t \\r \\\\ \\\" \\uXXXX — use single quotes ('…') for raw text with literal backslashes",
 }
@@ -205,6 +228,26 @@ local function quote_opens_span(prev)
   return prev == 0 or prev == 91 or prev == 123 or prev == 44 or prev == 58 or prev == 61
 end
 
+-- The bracket scanners' state: the depth, which open brackets are `{`, the
+-- last non-whitespace byte, and whether whitespace came after it. Inside a
+-- `{`, whitespace ends a compact pair, so a quote after it opens a key
+-- (`{a=1 "k}"=2}`).
+local function new_walk() return { depth = 0, braces = {}, prev = 0, prev_ws = false } end
+
+local function walk_quote_opens(w)
+  return quote_opens_span(w.prev) or (w.prev_ws and w.depth > 0 and w.braces[w.depth] == true)
+end
+
+local function walk_open(w, c)
+  w.depth = w.depth + 1
+  w.braces[w.depth] = c == 123
+end
+
+local function walk_byte(w, c)
+  w.prev = c
+  w.prev_ws = false
+end
+
 -- The index just past a single-line quoted span opening at 0-based
 -- `start`, or nil when it does not close before the newline.
 local function skip_quoted_span(src, start)
@@ -225,16 +268,16 @@ end
 -- The matching close for the `[`/`{` at 0-based `start`, scanning to the
 -- first newline, quoted spans skipped; nil when it never closes.
 local function bracket_close_index(src, start)
-  local depth = 0
+  local w = new_walk()
   local i = start
-  local prev = 0
   while i < #src and src:byte(i + 1) ~= 10 do
     local c = src:byte(i + 1)
     if c == 32 or c == 9 or c == 13 then
+      w.prev_ws = true
       i = i + 1
     elseif c == 39 or c == 34 then
-      local opens = quote_opens_span(prev)
-      prev = c
+      local opens = walk_quote_opens(w)
+      walk_byte(w, c)
       if opens then
         i = skip_quoted_span(src, i)
         if not i then return nil end
@@ -242,16 +285,16 @@ local function bracket_close_index(src, start)
         i = i + 1
       end
     elseif c == 91 or c == 123 then
-      depth = depth + 1
-      prev = c
+      walk_open(w, c)
+      walk_byte(w, c)
       i = i + 1
     elseif c == 93 or c == 125 then
-      depth = depth - 1
-      prev = c
+      w.depth = w.depth - 1
+      walk_byte(w, c)
       i = i + 1
-      if depth == 0 then return i - 1 end
+      if w.depth == 0 then return i - 1 end
     else
-      prev = c
+      walk_byte(w, c)
       i = i + 1
     end
   end
@@ -290,18 +333,33 @@ local function flow_rest_is_terminator(src, from)
   return c == 44 or c == 93 or c == 125 or c == 10 or c == 35
 end
 
+-- Where a compact object's unquoted value, one token, ends.
+local function is_compact_stop(c)
+  return c == 32 or c == 9 or c == 13 or c == 10 or c == 44 or c == 93 or c == 125
+end
+
+-- `flow_rest_is_terminator` for a compact object's value: the byte right
+-- after the close must end the token.
+local function compact_rest_is_terminator(src, from)
+  if from >= #src then return true end
+  return is_compact_stop(src:byte(from + 1))
+end
+
 -- "flow" or "bare_trailing": the flow-element twin, across newlines.
-local function classify_flow_bracket(src, start)
-  local depth = 0
+-- `ws_ends` is set for a compact object's value, one token, which
+-- whitespace after the close ends too (`{a=[1, 2] b=3}`): only content
+-- glued to the close makes it a string (`{href=[Blog](/x.md)}`).
+local function classify_flow_bracket(src, start, ws_ends)
+  local w = new_walk()
   local i = start
-  local prev = 0
   while i < #src do
     local c = src:byte(i + 1)
     if c == 32 or c == 9 or c == 13 or c == 10 then
+      w.prev_ws = true
       i = i + 1
     elseif c == 39 or c == 34 then
-      local opens = quote_opens_span(prev)
-      prev = c
+      local opens = walk_quote_opens(w)
+      walk_byte(w, c)
       if opens then
         i = skip_quoted_span(src, i)
         if not i then return "flow" end
@@ -309,16 +367,24 @@ local function classify_flow_bracket(src, start)
         i = i + 1
       end
     elseif c == 91 or c == 123 then
-      depth = depth + 1
-      prev = c
+      walk_open(w, c)
+      walk_byte(w, c)
       i = i + 1
     elseif c == 93 or c == 125 then
-      depth = depth - 1
-      prev = c
+      w.depth = w.depth - 1
+      walk_byte(w, c)
       i = i + 1
-      if depth == 0 then return flow_rest_is_terminator(src, i) and "flow" or "bare_trailing" end
+      if w.depth == 0 then
+        local terminal
+        if ws_ends then
+          terminal = compact_rest_is_terminator(src, i)
+        else
+          terminal = flow_rest_is_terminator(src, i)
+        end
+        return terminal and "flow" or "bare_trailing"
+      end
     else
-      prev = c
+      walk_byte(w, c)
       i = i + 1
     end
   end
@@ -429,6 +495,18 @@ local function add_entry(m, entry)
   m.entries[#m.entries + 1] = entry
   m.index[entry.key] = entry
 end
+
+-- `span`, where `node` is named or addressed, as a mention of `kind`, in
+-- the order the lines are read.
+local function mention(node, span, kind)
+  node.mentions = node.mentions or {}
+  node.mentions[#node.mentions + 1] = { span = span, kind = kind }
+end
+
+-- A key's mention kind: `entry` on a line that is its parent's own (the
+-- line's target, or a container this line made), `header` where the path
+-- reached the parent through one written elsewhere.
+local function reached_kind(own) return own and "entry" or "header" end
 
 -- ── quoted strings ──
 
@@ -659,8 +737,9 @@ function P:scan_index_seg()
   while self.pos < self.n and is_digit(self:at(self.pos)) do self.pos = self.pos + 1 end
   if self.pos == start or self:peek() ~= 93 then self:fail("FigBadKey") end
   local n = tonumber(self.src:sub(start + 1, self.pos))
+  local span = { start, self.pos }
   self:advance()
-  return { index = n }
+  return { index = n, span = span }
 end
 
 function P:scan_key_path()
@@ -679,56 +758,78 @@ end
 
 -- ── path navigation ──
 
-function P:get_or_create_map_container(m, seg)
+-- Mapping `m`'s container under `seg`, made when there is none, and
+-- whether it was made. `seg` is a `kind` mention of it either way; a nil
+-- `kind` records none.
+function P:get_or_create_map_container(m, seg, kind)
   local e = m.index[seg.name]
   if e then
     if e.value.value.kind ~= "container" then self:fail("FigKeyNotContainer") end
-    return self:open(e.value.value.container)
+    local c = self:open(e.value.value.container)
+    if kind then mention(e.value, seg.span, kind) end
+    return c, false
   end
   local child = new_container()
   local entry = { key = seg.name, key_span = seg.span, sep_span = { seg.span[2], seg.span[2] }, key_leading = {}, value = new_node({ kind = "container", container = child }, { seg.span[1], seg.span[2] }) }
   add_entry(m, entry)
-  return child
+  if kind then mention(entry.value, seg.span, kind) end
+  return child, true
 end
 
-function P:get_or_create_seq_container(s, idx)
+-- `span`, a literal index on this line, as where element `node` is
+-- addressed. A `+` re-runs a header from an earlier line, which recorded
+-- its indices.
+function P:index_mention(node, span)
+  if span[1] < self.cur_line_start then return end
+  mention(node, span, "index")
+end
+
+function P:get_or_create_seq_container(s, idx, step_span)
   if idx == "append" then
     if #s.elements == 0 then self:fail("FigEmptyAppendTarget") end
     local last = s.elements[#s.elements]
     if last.value.kind ~= "container" then self:fail("FigKeyNotContainer") end
-    return self:open(last.value.container)
+    return self:open(last.value.container), false
   end
   if idx < #s.elements then
     local el = s.elements[idx + 1]
     if el.value.kind ~= "container" then self:fail("FigKeyNotContainer") end
-    return self:open(el.value.container)
+    local c = self:open(el.value.container)
+    self:index_mention(el, step_span)
+    return c, false
   elseif idx == #s.elements then
     local child = new_container()
     local el = new_node({ kind = "container", container = child }, { self.cur_line_start, self.cur_line_start })
     s.elements[#s.elements + 1] = el
-    return child
+    self:index_mention(el, step_span)
+    return child, true
   end
   self:fail("FigIndexSkipped")
 end
 
-function P:navigate_intermediate(start, steps)
-  local cur = start
+-- Every step but the last, made or re-opened: the container reached, and
+-- whether this line made it. Each key step is a mention of the container
+-- it reaches, unless the line is a `+` re-running a header (`rerun`), whose
+-- keys that header recorded.
+function P:navigate_intermediate(start, steps, rerun)
+  local cur, own = start, true
   for i = 1, #steps - 1 do
     local step = steps[i]
     if step.key then
-      cur = self:get_or_create_map_container(self:as_mapping(cur), step.key)
+      local kind = not rerun and reached_kind(own) or nil
+      cur, own = self:get_or_create_map_container(self:as_mapping(cur), step.key, kind)
     else
       local s = self:as_sequence(cur)
       self:mark_addressed(s)
-      cur = self:get_or_create_seq_container(s, step.index)
+      cur, own = self:get_or_create_seq_container(s, step.index, step.span)
     end
   end
-  return cur
+  return cur, own
 end
 
 -- A header line's final segment: the container to push, its owner node,
 -- and its entry when reached through a key.
-function P:resolve_header_final(parent, last)
+function P:resolve_header_final(parent, own, last)
   if last.key then
     local k = last.key
     local m = self:as_mapping(parent)
@@ -736,12 +837,14 @@ function P:resolve_header_final(parent, last)
     if e then
       if e.value.value.kind ~= "container" then self:fail("FigDuplicateKey") end
       local c = self:open(e.value.value.container)
-      c.reentries[#c.reentries + 1] = { at = k.span[1], name = k.span }
+      c.reentries[#c.reentries + 1] = { at = k.span[1] }
+      mention(e.value, k.span, reached_kind(own))
       return c, e.value, e
     end
     local child = new_container()
     local entry = { key = k.name, key_span = k.span, sep_span = { k.span[2], k.span[2] }, key_leading = {}, value = new_node({ kind = "container", container = child }, { k.span[1], k.span[2] }) }
     add_entry(m, entry)
+    mention(entry.value, k.span, reached_kind(own))
     return child, entry.value, entry
   end
   local s = self:as_sequence(parent)
@@ -760,11 +863,13 @@ function P:resolve_header_final(parent, last)
     if el.value.kind ~= "container" then self:fail("FigKeyNotContainer") end
     local c = self:open(el.value.container)
     c.reentries[#c.reentries + 1] = { at = self.cur_line_start }
+    self:index_mention(el, last.span)
     return c, el, nil
   elseif idx == #s.elements then
     local child = new_container()
     local el = new_node({ kind = "container", container = child }, { self.cur_line_start, self.cur_line_start })
     s.elements[#s.elements + 1] = el
+    self:index_mention(el, last.span)
     return child, el, nil
   end
   self:fail("FigIndexSkipped")
@@ -993,18 +1098,50 @@ function P:parse_quoted_or_triple(q)
 end
 
 -- ── flow ──
+-- A `[…]` list's members are separated by `,`, and an unquoted one runs to
+-- the next `,`/`]`/`}`, spaces and all. A `{…}` object is fig-spelled (`=`
+-- pairs) or JSON-spelled (`:` pairs, quoted keys), as its first pair says.
+-- A fig-spelled one is compact: whitespace separates its pairs (a `,` is
+-- taken too), an unquoted value is one token, and a key is a dotted path
+-- whose implicit sub-objects stay open to the object's later pairs and
+-- close with it. A JSON-spelled one keeps its commas, and a value runs to
+-- the next `,`/`}`.
 
+-- Whitespace, newlines and `#` comments between flow tokens. A comment that
+-- holds a close is remembered: should the value then run out, it is the
+-- likelier culprit.
 function P:skip_flow_ws()
   while self.pos < self.n do
     local c = self:at(self.pos)
     if c == 32 or c == 9 or c == 13 or c == 10 then
       self.pos = self.pos + 1
     elseif c == 35 then
+      local at = self.pos
       while self.pos < self.n and self:at(self.pos) ~= 10 do self.pos = self.pos + 1 end
+      if self.src:sub(at + 1, self.pos):find("[%]}]") then self.flow_comment_close = at end
     else
       return
     end
   end
+end
+
+-- The input ran out inside a flow value.
+function P:unclosed_flow()
+  if self.flow_comment_close then self:fail_at(self.flow_comment_close, "FigFlowCommentedClose") end
+  self:fail("FigUnclosedFlow")
+end
+
+-- Content where a member should have ended: glued to a closing quote it is
+-- stray text, a close bracket is the wrong close, and anything else is a
+-- second member with no separator before it.
+function P:flow_stray(prev, comma_mode)
+  local first = self:at(prev.span[1])
+  if prev.value.kind == "string" and (first == 34 or first == 39) and self.pos == prev.span[2] then
+    self:fail("FigQuotedTrailingContent")
+  end
+  local c = self:peek()
+  if c == 93 or c == 125 then self:fail("FigUnclosedFlow") end
+  self:fail(comma_mode and "FigFlowMissingComma" or "FigFlowMissingEquals")
 end
 
 function P:parse_flow_value()
@@ -1019,53 +1156,41 @@ function P:parse_flow_array()
   seq.closed = true
   seq.kind = "sequence"
   self:skip_flow_ws()
-  if self:peek() == 93 then
-    self:advance()
-    return new_node({ kind = "container", container = seq }, { open, self.pos })
-  end
+  -- Each pass starts at a member or the close; a `,` there is a member that
+  -- is nothing, and a `,` before the close is allowed.
   while true do
-    seq.elements[#seq.elements + 1] = self:parse_flow_scalar_or_nested()
+    local c = self:peek()
+    if c == nil then self:unclosed_flow() end
+    if c == 93 then
+      self:advance()
+      break
+    end
+    if c == 44 then self:fail("FigFlowEmptyElement") end
+    local v = self:parse_flow_scalar_or_nested("list")
+    seq.elements[#seq.elements + 1] = v
     self:skip_flow_ws()
     local p = self:peek()
-    if p == nil then self:fail("FigUnclosedFlow") end
+    if p == nil then self:unclosed_flow() end
     if p == 44 then
       self:advance()
       self:skip_flow_ws()
-      if self:peek() == 93 then
-        self:advance()
-        break
-      end
-    elseif p == 93 then
-      self:advance()
-      break
-    else
-      self:fail("FigUnclosedFlow")
+    elseif p ~= 93 then
+      self:flow_stray(v, true)
     end
   end
   return new_node({ kind = "container", container = seq }, { open, self.pos })
 end
 
-local function is_flow_key_stop(c)
-  return c == 44 or c == 93 or c == 125 or c == 58 or c == 61 or c == 32 or c == 9 or c == 10 or c == 13
-end
-
-function P:parse_flow_key()
-  local c = self:peek()
-  if c == nil then self:fail("FigBadKey") end
-  local start = self.pos
-  if c == 34 then
-    local text, e = self:scan_double_quoted(self.pos)
-    self.pos = e
-    return { text = text, quoted = true, span = { start, e } }
+-- A flow object's key: a key path, as a block line's, less the indices.
+function P:scan_flow_key_path()
+  local segs = {}
+  while true do
+    segs[#segs + 1] = self:scan_key_seg()
+    if self:peek() ~= 46 then break end
+    self:advance()
   end
-  if c == 39 then
-    local text, e = self:scan_single_quoted(self.pos)
-    self.pos = e
-    return { text = text, quoted = true, span = { start, e } }
-  end
-  while self.pos < self.n and not is_flow_key_stop(self:at(self.pos)) do self.pos = self.pos + 1 end
-  if self.pos == start then self:fail("FigBadKey") end
-  return { text = self.src:sub(start + 1, self.pos), quoted = false, span = { start, self.pos } }
+  if self:peek() == 91 then self:fail("FigBadKey") end
+  return segs
 end
 
 function P:parse_flow_object()
@@ -1074,53 +1199,79 @@ function P:parse_flow_object()
   local map = new_container()
   map.closed = true
   map.kind = "mapping"
-  self:skip_flow_ws()
-  if self:peek() == 125 then
-    self:advance()
-    return new_node({ kind = "container", container = map }, { open, self.pos })
-  end
+  -- The sub-objects its dotted keys make, closed with it.
+  local implicit = {}
   local mode
+  self:skip_flow_ws()
   while true do
-    local key = self:parse_flow_key()
+    local c = self:peek()
+    if c == nil then self:unclosed_flow() end
+    if c == 125 then
+      self:advance()
+      break
+    end
+    if c == 44 then self:fail("FigFlowEmptyElement") end
+    local path = self:scan_flow_key_path()
+    local last = path[#path]
     self:skip_flow_ws()
+    local sep_at = self.pos
     local sep = self:peek()
-    if sep == nil then self:fail("FigUnclosedFlow") end
+    if sep == nil then self:unclosed_flow() end
     local this_mode
     if sep == 61 then
       this_mode = "fig"
     elseif sep == 58 then
-      if not key.quoted then self:fail("FigFlowBareKeyColon") end
-      this_mode = "json"
+      local q = self:at(last.span[1])
+      if #path == 1 and (q == 34 or q == 39) then
+        this_mode = "json"
+      elseif #path == 1 then
+        self:fail_at(sep_at, "FigFlowBareKeyColon")
+      else
+        self:fail_at(path[1].span[1], "FigBadKey")
+      end
     else
-      self:fail("FigUnclosedFlow")
+      self:fail_at(path[1].span[1], "FigFlowMissingEquals")
     end
-    if mode and mode ~= this_mode then self:fail("FigMixedFlowSeparators") end
+    if mode and mode ~= this_mode then self:fail_at(sep_at, "FigMixedFlowSeparators") end
     mode = this_mode
     self:advance()
     self:skip_flow_ws()
-    local v = self:parse_flow_scalar_or_nested()
-    if map.index[key.text] then self:fail("FigDuplicateKey") end
-    add_entry(map, { key = key.text, key_span = key.span, key_leading = {}, value = v })
-    self:skip_flow_ws()
-    local p = self:peek()
-    if p == nil then self:fail("FigUnclosedFlow") end
-    if p == 44 then
-      self:advance()
+    local v = self:parse_flow_scalar_or_nested(this_mode == "fig" and "compact" or "list")
+    local target = map
+    for i = 1, #path - 1 do
+      local child, made = self:get_or_create_map_container(target, path[i], nil)
+      if made then implicit[#implicit + 1] = child end
+      target = self:as_mapping(child)
+    end
+    if target.index[last.name] then self:fail_at(last.span[1], "FigDuplicateKey") end
+    add_entry(target, { key = last.name, key_span = last.span, key_leading = {}, value = v })
+    if this_mode == "fig" then
+      local nb = self:peek()
+      if nb == nil then self:unclosed_flow() end
+      if not is_compact_stop(nb) or nb == 93 then self:flow_stray(v, false) end
       self:skip_flow_ws()
-      if self:peek() == 125 then
+      if self:peek() == 44 then
         self:advance()
-        break
+        self:skip_flow_ws()
       end
-    elseif p == 125 then
-      self:advance()
-      break
     else
-      self:fail("FigUnclosedFlow")
+      self:skip_flow_ws()
+      local p = self:peek()
+      if p == nil then self:unclosed_flow() end
+      if p == 44 then
+        self:advance()
+        self:skip_flow_ws()
+      elseif p ~= 125 then
+        self:flow_stray(v, true)
+      end
     end
   end
+  for _, c in ipairs(implicit) do c.closed = true end
   return new_node({ kind = "container", container = map }, { open, self.pos })
 end
 
+-- A list member's unquoted value: to the next `,`/`]`/`}`/newline, spaces
+-- included; a `#` after whitespace ends it.
 function P:scan_flow_bare_value()
   local start = self.pos
   local prev_space = false
@@ -1135,7 +1286,36 @@ function P:scan_flow_bare_value()
   return self.src:sub(ts + 1, te), { ts, te }
 end
 
-function P:scan_flow_bare_bracket()
+local function compact_token_end(src, from)
+  local i = from
+  while i < #src and not is_compact_stop(src:byte(i + 1)) do i = i + 1 end
+  return i
+end
+
+-- A compact object's unquoted value: one token, to whitespace or a
+-- `,`/`]`/`}`, a `#` inside it content. One join: a local date, a space and
+-- a time are one datetime, since a time can never be a key.
+function P:scan_compact_bare()
+  local start = self.pos
+  self.pos = compact_token_end(self.src, self.pos)
+  if self.pos < self.n and self:at(self.pos) == 32 then
+    local first = sniff_bare(self.src:sub(start + 1, self.pos))
+    if first.ext_kind == "local_date" then
+      local e = compact_token_end(self.src, self.pos + 1)
+      if e > self.pos + 1 then
+        local joined = sniff_bare(self.src:sub(start + 1, e))
+        if joined.ext_kind == "local_datetime" or joined.ext_kind == "offset_datetime" then self.pos = e end
+      end
+    end
+  end
+  return self.src:sub(start + 1, self.pos), { start, self.pos }
+end
+
+-- An unquoted value that opens with a bracket and goes on past its close
+-- (a markdown link): brackets nest, and only a `,`/`]`/`}` at depth 0, a
+-- newline, a `#` after whitespace, or in a compact object any whitespace
+-- at depth 0, ends it.
+function P:scan_flow_bare_bracket(pos)
   local start = self.pos
   local depth = 0
   local prev_space = false
@@ -1148,6 +1328,8 @@ function P:scan_flow_bare_bracket()
       depth = depth - 1
     elseif ch == 44 or ch == 10 then
       if depth == 0 then break end
+    elseif ch == 32 or ch == 9 or ch == 13 then
+      if depth == 0 and pos == "compact" then break end
     elseif ch == 35 then
       if prev_space and depth == 0 then break end
     end
@@ -1158,18 +1340,21 @@ function P:scan_flow_bare_bracket()
   return self.src:sub(ts + 1, te), { ts, te }
 end
 
-function P:parse_flow_scalar_or_nested()
+-- A member: `pos` is "list" for a list's or a JSON-spelled object's, and
+-- "compact" for a fig-spelled object's.
+function P:parse_flow_scalar_or_nested(pos)
   self:skip_flow_ws()
   local c = self:peek()
-  if c == nil then self:fail("FigUnclosedFlow") end
+  if c == nil then self:unclosed_flow() end
   if c == 91 or c == 123 then
-    if classify_flow_bracket(self.src, self.pos) == "bare_trailing" then
-      local text, span = self:scan_flow_bare_bracket()
+    if classify_flow_bracket(self.src, self.pos, pos == "compact") == "bare_trailing" then
+      local text, span = self:scan_flow_bare_bracket(pos)
       if text == "" then self:fail("FigInvalidValue") end
       return new_node({ kind = "string", text = text }, span)
     end
     return self:parse_flow_value()
   end
+  if self:is_triple_at(self.pos, 39) or self:is_triple_at(self.pos, 34) then self:fail("FigFlowMultilineString") end
   if c == 34 or c == 39 then
     local start = self.pos
     local text, e
@@ -1177,19 +1362,27 @@ function P:parse_flow_scalar_or_nested()
     self.pos = e
     return new_node({ kind = "string", text = text }, { start, e })
   end
-  local text, span = self:scan_flow_bare_value()
+  local text, span
+  if pos == "compact" then
+    text, span = self:scan_compact_bare()
+  else
+    text, span = self:scan_flow_bare_value()
+  end
   if text == "" then self:fail("FigInvalidValue") end
   return sniff_to_node(text, span)
 end
 
 -- ── lines ──
 
-function P:finish_header(target, steps, depth)
+function P:finish_header(target, steps, path, depth)
   if not self:at_end_of_content() then self:fail("FigTrailingContent") end
   local leading = self:drain_pending()
-  local parent = self:navigate_intermediate(target, steps)
+  local parent, own = self:navigate_intermediate(target, steps, false)
   local last = steps[#steps]
-  local container, owner, entry = self:resolve_header_final(parent, last)
+  local container, owner, entry = self:resolve_header_final(parent, own, last)
+  -- The element a header-final `[]` appends is written by this path, which
+  -- a `+` after it repeats.
+  if last.index == "append" then mention(owner, path, "append") end
   if entry then append_all(entry.key_leading, leading) else append_all(owner.leading, leading) end
   local cm = self:scan_trailing_comment_only()
   if cm then owner.trailing = cm end
@@ -1201,7 +1394,7 @@ end
 function P:finish_assignment(target, steps, type_name, sep)
   self:skip_spaces_tabs()
   local leading = self:drain_pending()
-  local parent = self:navigate_intermediate(target, steps)
+  local parent = self:navigate_intermediate(target, steps, false)
   local last = steps[#steps]
   local value_node = self:parse_assigned_value(type_name)
   self:consume_line_end()
@@ -1221,6 +1414,7 @@ function P:finish_assignment(target, steps, type_name, sep)
     if idx < #s.elements then self:fail("FigIndexAlreadySet") end
     if idx > #s.elements then self:fail("FigIndexSkipped") end
     s.elements[#s.elements + 1] = value_node
+    self:index_mention(value_node, last.span)
   end
 end
 
@@ -1238,7 +1432,9 @@ function P:scan_type_name()
 end
 
 function P:parse_key_line(target, depth)
+  local path_start = self.pos
   local steps = self:scan_key_path()
+  local path = { path_start, self.pos }
   self:skip_spaces_tabs()
   if self:peek() == 58 then
     local type_name = self:scan_type_name()
@@ -1250,7 +1446,7 @@ function P:parse_key_line(target, depth)
     self:advance()
     self:finish_assignment(target, steps, nil, eq)
   else
-    self:finish_header(target, steps, depth)
+    self:finish_header(target, steps, path, depth)
   end
 end
 
@@ -1311,6 +1507,7 @@ function P:is_plus_line()
 end
 
 function P:parse_continuation_line(depth)
+  local plus = { self.pos, self.pos + 1 }
   self:advance() -- +
   if depth ~= 0 then self:fail("FigDanglingContinuation") end
   local steps = self.last_append_steps
@@ -1318,8 +1515,10 @@ function P:parse_continuation_line(depth)
   self:skip_spaces_tabs()
   if not self:at_end_of_content() then self:fail("FigTrailingContent") end
   local leading = self:drain_pending()
-  local parent = self:navigate_intermediate(self.root, steps)
-  local container, owner = self:resolve_header_final(parent, steps[#steps])
+  local parent, own = self:navigate_intermediate(self.root, steps, true)
+  local container, owner = self:resolve_header_final(parent, own, steps[#steps])
+  -- The `+` stands for the header it re-runs.
+  mention(owner, plus, "append")
   append_all(owner.leading, leading)
   local cm = self:scan_trailing_comment_only()
   if cm then owner.trailing = cm end
@@ -1376,9 +1575,7 @@ local function is_section(node)
 end
 
 local function reenter(S, built, c)
-  for _, r in ipairs(c.reentries) do
-    if r.name then S:reopen(built, r.name, "entry") else S:region(built, r.at) end
-  end
+  for _, r in ipairs(c.reentries) do S:region(built, r.at) end
 end
 
 local function build_node(S, node)
@@ -1398,7 +1595,8 @@ local function build_node(S, node)
         if e.sep_span then kv.sep = e.sep_span end
         if e.value.span[2] > end_ then end_ = e.value.span[2] end
         if is_section(e.value) then
-          S:open(built, kv, "entry")
+          built:put(kv)
+          S:region(value, e.key_span[1])
           reenter(S, value, e.value.value.container)
         else
           built:put(kv)
@@ -1428,6 +1626,9 @@ local function build_node(S, node)
   end
   if node.trailing then built:comment("trailing", node.trailing) end
   for _, t in ipairs(node.dangling) do built:comment("dangling", t) end
+  if node.mentions then
+    for _, m in ipairs(node.mentions) do S:mention(built, m.span, m.kind) end
+  end
   return built
 end
 
@@ -1485,8 +1686,9 @@ local function is_total_sink_safe(s)
   return true
 end
 
-local function flow_leading_bracket_bare(s)
-  if classify_flow_bracket(s, 0) ~= "bare_trailing" then return false end
+local function flow_leading_bracket_bare(s, compact)
+  if classify_flow_bracket(s, 0, compact) ~= "bare_trailing" then return false end
+  if compact and s:find("[ \t]") then return false end
   local depth = 0
   local prev_space = false
   for i = 1, #s do
@@ -1506,7 +1708,10 @@ local function flow_leading_bracket_bare(s)
   return depth == 0
 end
 
+-- `in_flow` is false in block position, true for a list's element, and
+-- "compact" for a `{…}` object's value, which is one token.
 local function is_bare_safe(s, is_key, in_flow)
+  local compact = in_flow == "compact"
   if s == "" then return false end
   if s:sub(1, 1) == " " or s:sub(-1) == " " then return false end
   for i = 1, #s do
@@ -1519,10 +1724,11 @@ local function is_bare_safe(s, is_key, in_flow)
     local f = s:byte(1)
     if f == 39 or f == 34 then return false end
     if f == 91 or f == 123 then
-      if in_flow then return flow_leading_bracket_bare(s) end
+      if in_flow then return flow_leading_bracket_bare(s, compact) end
       if classify_bracket_commit(s, 0) ~= "bare_trailing" then return false end
     end
     if in_flow and s:find("[,%]}]") then return false end
+    if compact and s:find(" ", 1, true) then return false end
     local prev_ws = true
     for i = 1, #s do
       local c = s:byte(i)
@@ -1556,9 +1762,13 @@ local function bare_or_quoted(s, is_key, in_flow)
   return '"' .. s:gsub('["\\\n\r\t]', { ['"'] = '\\"', ["\\"] = "\\\\", ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }) .. '"'
 end
 
+-- A string holding newlines, in block position, as its opener and the rest
+-- (content and closer, from the opener line's newline on): `'''` raw when
+-- the content goes through verbatim, else `"""` with `\`, `"` and `\r`
+-- escaped. A comment on the value goes between the two.
 local function multiline_string(s)
-  if not s:find("'''", 1, true) and not s:find("\r", 1, true) then return "'''\n" .. s .. "\n'''" end
-  return '"""\n' .. s:gsub('[\\"\r]', { ["\\"] = "\\\\", ['"'] = '\\"', ["\r"] = "\\r" }) .. '\n"""'
+  if not s:find("'''", 1, true) and not s:find("\r", 1, true) then return "'''", "\n" .. s .. "\n'''" end
+  return '"""', "\n" .. s:gsub('[\\"\r]', { ["\\"] = "\\\\", ['"'] = '\\"', ["\r"] = "\\r" }) .. '\n"""'
 end
 
 local function char_literal(text)
@@ -1650,17 +1860,27 @@ function Pr:compute_inline_width(row)
   end
   if k == "mapping" then
     if #row.items == 0 then return 2 end
-    local w = 4
+    -- `{` and `}`, and `key=value` pairs a space apart.
+    local w = 2
     for i, e in ipairs(row.items) do
       if self:comments_on() and #e.key.leading > 0 then return nil end
       if e.value.kind == "mapping" then return nil end
-      local vw = self:inline_width(e.value, "strict")
+      local vw = self:compact_value_width(e.value)
       if not vw then return nil end
-      w = w + self:key_width(e.key) + 3 + vw + (i > 1 and 2 or 0)
+      w = w + self:key_width(e.key) + 1 + vw + (i > 1 and 1 or 0)
     end
     return w
   end
   return nil
+end
+
+-- `inline_width` for a `{…}` object's value: a string there is one token,
+-- so its width is the compact one.
+function Pr:compact_value_width(row)
+  local w = self:inline_width(row, "strict")
+  if not w then return nil end
+  if row.kind == "string" and not row.ext_kind then return scalar_string_width(row.text or "", false, "compact") end
+  return w
 end
 
 function Pr:fits_inline(row, prefix_width, policy)
@@ -1855,16 +2075,32 @@ function Pr:flow_value(row)
     self:put("]")
   elseif row.kind == "mapping" then
     if #row.items == 0 then return self:put("{}") end
-    self:put("{ ")
+    -- Compact pairs, `{x=1 y=2}`.
+    self:put("{")
     for i, e in ipairs(row.items) do
-      if i > 1 then self:put(", ") end
-      self:put(bare_or_quoted(self:key_text(e.key), true, false), " = ")
-      self:value(e.value, true)
+      if i > 1 then self:put(" ") end
+      self:put(bare_or_quoted(self:key_text(e.key), true, false), "=")
+      self:value(e.value, "compact")
     end
-    self:put(" }")
+    self:put("}")
   else
     error("a " .. row.kind .. " has no flow spelling", 0)
   end
+end
+
+-- A block-position scalar and its trailing comment: after the value, or for
+-- a multi-line string on its opener line (`x = ''' # note`), the one place
+-- the spec gives it.
+function Pr:scalar_and_comment(row)
+  if is_multiline(row) then
+    local opener, rest = multiline_string(row.text)
+    self:put(opener)
+    self:trailing_comment(row)
+    self:put(rest)
+    return
+  end
+  self:value(row, false)
+  self:trailing_comment(row)
 end
 
 function Pr:multiline_flow_seq(row, indent, comment_anchor)
@@ -1931,8 +2167,7 @@ function Pr:map_entry_line(e, depth)
   else
     self:type_annotation(v)
     self:put(" = ")
-    self:value(v, false)
-    self:trailing_comment(v)
+    self:scalar_and_comment(v)
     self:put("\n")
   end
 end
@@ -1971,8 +2206,7 @@ function Pr:seq_body(row, depth)
     else
       local annotated = self:type_annotation(el)
       self:put(annotated and " = " or " ")
-      self:value(el, false)
-      self:trailing_comment(el)
+      self:scalar_and_comment(el)
       self:put("\n")
     end
   end
@@ -2019,7 +2253,9 @@ function Pr:section_assign(anchor_key, v)
   else
     self:type_annotation(v)
     self:put(" = ")
-    self:value(v, false)
+    self:scalar_and_comment(v)
+    self:put("\n")
+    return
   end
   self:trailing_comment(v)
   self:put("\n")

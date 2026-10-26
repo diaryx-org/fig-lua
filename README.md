@@ -45,10 +45,11 @@ the compiled parser step for step, and most are grammars:
 - `fig.lua` — fig's own authoring dialect, `.figl`, whole: `>` marker
   depth, section headers and `a.b[]`/`+` append headers, `*` elements,
   dotted keys, `key: type = value` annotations kept as tags, flow values
-  with the balanced-then-trailing rule that leaves a markdown link bare,
-  multiline strings, comments placed by their own depth; and the `fig
-  fmt` house style — sections, hoisting, dotted collapse, append groups,
-  multi-line flow — byte for byte, plus the `tail` renderer that
+  with the balanced-then-trailing rule that leaves a markdown link bare
+  and figl spec 2.0's compact `{x=1 y=2}` objects, multiline strings,
+  comments placed by their own depth; and the `fig fmt` house style —
+  sections, hoisting, dotted collapse, append groups, multi-line flow —
+  byte for byte, plus the `tail` renderer that
   re-prints a block value one marker level below its key.
 - `ini.lua` — `[section]` files: `key = value` lines, `;` and `#`
   comments, a reopened section merged into the first. The smaller section
