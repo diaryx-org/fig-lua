@@ -595,40 +595,10 @@ fn lua_fig() -> Format {
     *FORMAT.get_or_init(|| fig::language::register(script("fig.lua")).expect("registers")[0])
 }
 
-/// The figl fixtures whose compiled table carries the mentions fig 6 added —
-/// a key that re-opens a container mid-path, and `index` and `append` —
-/// which `fig.lua` does not record yet; and those the compiled printer writes
-/// in figl spec 2.0's compact flow objects (`{x=1 y=2}`), or with a
-/// multi-line string's comment on its opener line, where `fig.lua` writes
-/// fig 4's. Each list shrinks as
-/// `docs/tasks/figl-twin-mentions-and-prints-as-fig-4-did.md` is done; every
-/// other fixture, and every other check of these, is held to fig 7 as it is.
-const FIGL_TABLES_AHEAD: &[&str] = &[
-    "append-headers.figl",
-    "dotted-keys.figl",
-    "index-addressing.figl",
-    "kitchen-sink.figl",
-];
-const FIGL_PRINTS_AHEAD: &[&str] = &[
-    "append-headers.figl",
-    "deep.figl",
-    "dotted-keys.figl",
-    "elements.figl",
-    "flow.figl",
-    "index-addressing.figl",
-    "kitchen-sink.figl",
-    "root-sequence.figl",
-    "sections.figl",
-    "strings.figl",
-];
-
 #[test]
 fn fig_parses_every_fixture_to_the_compiled_table() {
     let lang = script("fig.lua");
     for (name, source, want) in fixtures("fig", "figl") {
-        if FIGL_TABLES_AHEAD.contains(&name.as_str()) {
-            continue;
-        }
         let table = lang
             .parse("lua-fig", &source)
             .unwrap_or_else(|e| panic!("{name}: {}", e.message));
@@ -665,18 +635,51 @@ fn fig_registers_and_is_the_compiled_format_at_every_entry_point() {
             theirs.serialize(mine_fmt).unwrap(),
             "{name}: the script prints the two trees differently"
         );
-        if !FIGL_PRINTS_AHEAD.contains(&name.as_str()) {
-            assert_eq!(
-                mine.serialize(mine_fmt).unwrap(),
-                theirs.serialize(compiled::fig()).unwrap(),
-                "{name}: the script's printer differs from the compiled one"
-            );
-        }
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(compiled::fig()).unwrap(),
+            "{name}: the script's printer differs from the compiled one"
+        );
         // Compared as printed: `n: float = inf` is a NaN-class float on
         // neither side, but a `nan` would be, and NaN is not equal to itself.
         assert_eq!(
             format!("{:?}", mine.to_value().unwrap()),
             format!("{:?}", theirs.to_value().unwrap())
+        );
+    }
+}
+
+#[test]
+fn fig_reads_compact_objects_as_the_compiled_format_does() {
+    // Figl spec 2.0's flow objects, which no fixture spells every way:
+    // whitespace between pairs, a value of one token, dotted keys through
+    // implicit sub-objects, a date and a time as one datetime, and a
+    // JSON-spelled object beside them.
+    let mine_fmt = lua_fig();
+    for src in [
+        &b"a = {x=1 y=two z=\"Hello world\"}\n"[..],
+        b"b = { x = 1, y = 2, }\n",
+        b"c = {lang = en  data.count = 3}\n",
+        b"d = {xs=[1, 2] href=[Blog](/x.md) tag=a#b}\n",
+        b"e = {\n  p=1  # a comment\n  q=2\n}\n",
+        b"t = {at=2026-07-01 09:00 on=2026-07-02 n=1}\n",
+        b"p = {a.b=1 a.c=2 \"a.b\"=3 x.\"y z\".w=4}\n",
+        b"q = {a=1 \"k}\"=2}\n",
+        b"who = { \"name\": Ada Lovelace, \"n\": [1, 2] }\n",
+        b"audience = [friends, Ada Lovelace, public]\n",
+    ] {
+        let text = String::from_utf8_lossy(src);
+        let mine = Document::parse(src, mine_fmt).unwrap_or_else(|e| panic!("{text}: {e}"));
+        let theirs = Document::parse(src, compiled::fig()).unwrap();
+        assert_eq!(
+            format!("{:?}", mine.to_value().unwrap()),
+            format!("{:?}", theirs.to_value().unwrap()),
+            "{text}"
+        );
+        assert_eq!(
+            mine.serialize(mine_fmt).unwrap(),
+            theirs.serialize(compiled::fig()).unwrap(),
+            "{text}"
         );
     }
 }
@@ -703,6 +706,30 @@ fn fig_refuses_what_the_compiled_format_refuses() {
         b"a = { x = 1 }\na.y = 2\n",
         b"l\n> * 1\n> k = 2\n",
         b"a = '''abc'''\n",
+        // Spec 2.0's flow values: a compact object's value is one token,
+        // its key a key path, and an explicit `{…}` stays closed.
+        b"p = {name=Adam Harris}\n",
+        b"p = { x }\n",
+        b"p = {a=\"x\"b=2}\n",
+        b"p = [\"x\"y]\n",
+        b"p = [\"a\" \"b\"]\n",
+        b"p = [a\nb]\n",
+        b"p = [a,,b]\n",
+        b"p = [,]\n",
+        b"p = {a=1,,b=2}\n",
+        b"p = {x = \"\"\"\nhi\n\"\"\"}\n",
+        b"p = [see #3, y]\n",
+        b"p = {x = 1, \"y\": 2}\n",
+        b"p = {\"x\": 1, y = 2}\n",
+        b"p = {a={b=1} a.c=2}\n",
+        b"p = {a.b=1}\np.a.c = 2\n",
+        b"p = {a.b=1 a=2}\n",
+        b"p = {a=1 a.b=2}\n",
+        b"p = {@x=1}\n",
+        b"p = {-x=1}\n",
+        b"p = {[q=1}\n",
+        b"p = {a.b[0]=1}\n",
+        b"p = {a.b: 1}\n",
     ] {
         assert!(
             Document::parse(bad, compiled::fig()).is_err(),
@@ -718,7 +745,6 @@ fn fig_refuses_what_the_compiled_format_refuses() {
 }
 
 #[test]
-#[ignore = "the compiled figl writes spec 2.0's compact flow objects, fig.lua fig 4's: docs/tasks/figl-twin-mentions-and-prints-as-fig-4-did.md"]
 fn fig_edits_as_the_compiled_format_does() {
     // The section format's editing surface, fig-shaped: values under
     // markers, a key that creates a container, a container deleted with
@@ -763,7 +789,7 @@ fn fig_edits_as_the_compiled_format_does() {
     // A block map set as a value. The Rust editor spells a `Value` through
     // the format it is editing, and asks the compiled fig printer for the
     // flow form by name — a request the wire does not carry — so the
-    // compiled format splices `registry = { a = 1, b = 2 }` while the
+    // compiled format splices `registry = {a=1 b=2}` while the
     // script's block spelling goes through its `tail` renderer and lands
     // as a nested section. Two spellings of one tree.
     let registry = Value::Map(vec![
@@ -783,10 +809,7 @@ fn fig_edits_as_the_compiled_format_does() {
         mine.source().unwrap()
     );
     assert!(
-        theirs
-            .source()
-            .unwrap()
-            .contains("registry = { a = 1, b = 2 }"),
+        theirs.source().unwrap().contains("registry = {a=1 b=2}"),
         "{}",
         theirs.source().unwrap()
     );

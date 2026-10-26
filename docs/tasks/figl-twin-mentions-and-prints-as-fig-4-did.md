@@ -1,13 +1,26 @@
 ---
 title: fig.lua mentions and prints figl as fig 4 did
 description: fig-lua builds against fig 7, and fig.lua reads every figl fixture to the compiled tree, but its node table lacks the mentions fig 6 added and its printer writes fig 4's flow objects and multi-line string comments
-status: open
+status: done
 created: 2026-10-24
-updated: 2026-10-24
+updated: 2026-10-26
 part_of: "[Tasks](tasks.md)"
 ---
 
 # fig.lua mentions and prints figl as fig 4 did
+
+**Status.** Done, by `fix(languages): fig.lua mentions, reads and prints
+figl as fig 7 does`. Every key that makes or re-opens a block container is
+an `entry` or `header` mention, a literal `[n]` an `index` one and an
+`a.b[]` header or a `+` an `append` one; a `{…}` object is read and
+printed compact, as spec 2.0 has it; and a `'''` or `"""` string's
+comment prints on its opener line. `M.syntax` declares the compiled
+figl's flow separators, `empty_seq_literal`, `line_prefix_marks` and
+`opener_line_comment`, so an edit spells what it writes the same way.
+`FIGL_TABLES_AHEAD` and `FIGL_PRINTS_AHEAD` are gone,
+`fig_edits_as_the_compiled_format_does` runs, the refusals test holds the
+spec 2.0 flow errors, and `fig_reads_compact_objects_as_the_compiled_format_does`
+holds the compact forms no fixture spells.
 
 fig-lua moved from fig 4 to fig 7 with every other twin brought level with
 fig 7's compiled language. `fig.lua` was not: it reads each figl fixture to
